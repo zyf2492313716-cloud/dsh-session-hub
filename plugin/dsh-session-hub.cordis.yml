@@ -1,0 +1,5 @@
+# dsh-session-hub cordis patch
+- insert:
+    - id: dsh-session-hub
+      name: '@dsh-local/dsh-session-hub'
+      inject: [webServer, workspaceRegistry, sessions]

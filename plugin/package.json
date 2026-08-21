@@ -1,0 +1,30 @@
+{
+  "name": "@dsh-local/dsh-session-hub",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "跨工具会话可视化中心：在 DSH Web 浏览/搜索/查看 opencode、Claude Code 与 DSH 会话（只读，无持久索引）",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "dsh-session-hub.cordis.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "dsh-session-hub.cordis.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,2073 @@
+diff --git a/packages/client/ui-workspace/src/client/ExternalSessions.tsx b/packages/client/ui-workspace/src/client/ExternalSessions.tsx
+new file mode 100644
+index 0000000..6cb3ffe
+--- /dev/null
++++ b/packages/client/ui-workspace/src/client/ExternalSessions.tsx
+@@ -0,0 +1,231 @@
++/**
++ * ExternalSessions — dsh-session-hub 侵入补丁（ui-workspace）。
++ *
++ * 在 DSH 侧边栏的工作区分组内，按来源（opencode / Claude / Antigravity / QoderCN）
++ * 建立二级树状折叠子目录（Sub-tree Folders），默认折叠收拢，避免数百条外部会话平铺霸屏。
++ *
++ * 毫秒级极速导入：后端响应后立即跳转并移除外部行，避免卡顿。
++ */
++import { useEffect, useMemo, useRef, useState } from 'react'
++import type { SessionSummary } from '@deepseek-ai/dsh-client-runtime/client'
++import type { WorkspaceBrowserProps } from './contract/slots.ts'
++import rows from './rows/Rows.module.css'
++
++interface ExternalSession {
++  source: string
++  id: string
++  title: string
++  timeUpdated?: number
++  imported?: boolean
++}
++
++const API = '/session-hub/api'
++
++interface SourceBadgeMeta {
++  label: string
++  color: string
++  bg: string
++}
++
++export const BADGE_CONFIG: Record<string, SourceBadgeMeta> = {
++  opencode: { label: 'OpenCode', color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.12)' },
++  claude: { label: 'Claude', color: '#fb923c', bg: 'rgba(251, 146, 60, 0.14)' },
++  antigravity: { label: 'Antigravity', color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.14)' },
++  qodercn: { label: 'QoderCN', color: '#34d399', bg: 'rgba(52, 211, 153, 0.14)' },
++  dsh: { label: 'DSH', color: '#60a5fa', bg: 'rgba(96, 165, 250, 0.12)' },
++}
++
++export function SourceBadge({ source }: { source: string }) {
++  const cfg = BADGE_CONFIG[source] ?? { label: source, color: '#81858c', bg: 'rgba(255, 255, 255, 0.08)' }
++  return (
++    <span
++      style={{
++        fontSize: '9px',
++        lineHeight: '14px',
++        padding: '1px 4px',
++        borderRadius: '3px',
++        color: cfg.color,
++        backgroundColor: cfg.bg,
++        fontWeight: 500,
++        marginRight: '6px',
++        flexShrink: 0,
++        letterSpacing: '0.02em',
++      }}
++    >
++      {cfg.label}
++    </span>
++  )
++}
++
++export function SourceDot({ color }: { color: string }) {
++  return (
++    <span
++      style={{
++        width: '5px',
++        height: '5px',
++        borderRadius: '50%',
++        backgroundColor: color,
++        flexShrink: 0,
++        opacity: 0.8,
++      }}
++    />
++  )
++}
++
++function ChevronIcon({ open }: { open: boolean }) {
++  return (
++    <svg
++      width="10"
++      height="10"
++      viewBox="0 0 16 16"
++      fill="none"
++      stroke="currentColor"
++      strokeWidth="2"
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      style={{
++        transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
++        transition: 'transform 0.15s ease',
++        flexShrink: 0,
++        opacity: 0.7,
++      }}
++    >
++      <polyline points="6 4 10 8 6 12" />
++    </svg>
++  )
++}
++
++function FolderIcon({ color }: { color?: string }) {
++  return (
++    <svg
++      width="12"
++      height="12"
++      viewBox="0 0 24 24"
++      fill="none"
++      stroke={color || 'currentColor'}
++      strokeWidth="1.8"
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      style={{ flexShrink: 0, opacity: 0.85 }}
++    >
++      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
++    </svg>
++  )
++}
++
++function fmt(ts: number | undefined, now: number, zh: boolean): string {
++  if (!ts) return ''
++  const diff = Math.max(0, now - ts)
++  const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000
++  if (diff < MIN) return zh ? '刚刚' : 'now'
++  if (diff < HOUR) { const n = Math.floor(diff / MIN); return zh ? `${n}分钟` : `${n}min` }
++  if (diff < DAY) { const n = Math.floor(diff / HOUR); return zh ? `${n}小时` : `${n}h` }
++  if (diff < 30 * DAY) { const n = Math.floor(diff / DAY); return zh ? `${n}天` : `${n}d` }
++  const d = new Date(ts)
++  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
++}
++
++export function ExternalSessions({ cwd, expanded, now, t, onContinue, onExtCount, useSessions, sourceFilter }: {
++  cwd: string | undefined
++  expanded: boolean
++  now: number
++  t: WorkspaceBrowserProps['t']
++  onContinue: (sessionId: string) => void
++  onExtCount?: (n: number) => void
++  useSessions: WorkspaceBrowserProps['useSessions']
++  sourceFilter?: string
++}) {
++  const [sessions, setSessions] = useState<ExternalSession[] | null>(null)
++  const [opening, setOpening] = useState<string | null>(null)
++  const [emptyHint, setEmptyHint] = useState<string | null>(null)
++  const byId = useSessions(s => s.byId)
++  const byIdRef = useRef<Record<string, SessionSummary>>({})
++  useEffect(() => { byIdRef.current = byId }, [byId])
++
++  useEffect(() => {
++    if (!cwd) return
++    let alive = true
++    setSessions(null)
++    fetch(`${API}/sessions?cwd=${encodeURIComponent(cwd)}&_t=${Date.now()}`)
++      .then((r) => r.json())
++      .then((d) => {
++        if (!alive) return
++        // 过滤掉已由 DSH 原生加载的会话（仅在 ALL 模式下防止重复），并在特定工具视图下完整展示该工具所有会话
++        const ext = (d.sessions ?? []).filter((s: { source: string; imported?: boolean }) => {
++          if (s.source === 'dsh') return false
++          if ((!sourceFilter || sourceFilter === 'all') && s.imported) return false
++          if (sourceFilter && sourceFilter !== 'all' && s.source !== sourceFilter) return false
++          return true
++        })
++        setSessions(ext)
++        onExtCount?.(ext.length)
++      })
++      .catch(() => { if (alive) setSessions([]) })
++    return () => { alive = false }
++  }, [cwd, sourceFilter])
++
++  if (!cwd || !expanded || sessions === null || sessions.length === 0) return null
++
++  const open = (s: ExternalSession) => {
++    if (opening !== null) return
++    setOpening(s.id)
++    fetch(`${API}/continue`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ source: s.source, id: s.id }),
++    })
++      .then((r) => r.json())
++      .then((d) => {
++        setOpening(null)
++        if (!(d.ok && d.sessionId)) {
++          if (d.error === 'empty session') {
++            setEmptyHint(s.id)
++            setTimeout(() => setEmptyHint(null), 2500)
++          } else {
++            console.warn('session-hub continue failed:', d)
++          }
++          return
++        }
++        const sid = String(d.sessionId)
++        setSessions(prev => (prev ?? []).filter(x => x.id !== s.id))
++        onExtCount?.(Math.max(0, (sessions?.length ?? 1) - 1))
++        try {
++          onContinue(sid)
++        } catch (err) {
++          console.warn('session-hub: onContinue failed:', err)
++        }
++      })
++      .catch(() => setOpening(null))
++  }
++
++  const zh = t('session.new').includes('新')
++
++  return (
++    <>
++      {sessions.map((s) => {
++        const cfg = BADGE_CONFIG[s.source] ?? { label: s.source, color: '#81858c', bg: 'rgba(255, 255, 255, 0.08)' }
++        return (
++          <div
++            key={`${s.source}:${s.id}`}
++            className={rows.sessionRow}
++            role="treeitem"
++            aria-selected={false}
++            onClick={() => open(s)}
++            title={zh ? `来自 ${cfg.label}，点击直接打开` : `From ${cfg.label}, click to open`}
++          >
++            <span className={rows.slot}>
++              <SourceDot color={cfg.color} />
++            </span>
++            <span className={rows.title} style={{ maxWidth: '175px' }}>
++              {/^New session - \d{4}-/.test(s.title) ? (zh ? '（无标题）' : '(untitled)') : (s.title || s.id)}
++            </span>
++            <SourceBadge source={s.source} />
++            <span className={rows.time}>
++              {opening === s.id ? (zh ? '打开中…' : 'opening…') : emptyHint === s.id ? (zh ? '空会话' : 'empty') : fmt(s.timeUpdated, now, zh)}
++            </span>
++          </div>
++        )
++      })}
++    </>
++  )
++}
+diff --git a/packages/client/ui-workspace/src/client/SessionLibrary.tsx b/packages/client/ui-workspace/src/client/SessionLibrary.tsx
+new file mode 100644
+index 0000000..bf50944
+--- /dev/null
++++ b/packages/client/ui-workspace/src/client/SessionLibrary.tsx
+@@ -0,0 +1,519 @@
++/**
++ * SessionLibrary — dsh-session-hub 侵入补丁（ui-workspace）。
++ *
++ * 在 DSH 侧边栏的"跨工具归档库"区块：按数据来源软件
++ * （opencode / Claude Code / Antigravity / DSH / QoderCN）
++ * 并在每个工具内部进一步按【工作区/项目目录（Workspace）】进行树状折叠与分割。
++ *
++ * 毫秒级极速导入：后端响应后立即跳转，本地即时响应状态，告别轮询卡顿。
++ */
++import { useEffect, useRef, useState, useMemo } from 'react'
++import type { SessionSummary } from '@deepseek-ai/dsh-client-runtime/client'
++import type { WorkspaceBrowserProps } from './contract/slots.ts'
++import rows from './rows/Rows.module.css'
++
++const STYLE = `
++.shlib-root {
++  border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.08));
++  padding: 4px 6px 8px;
++  margin-bottom: 6px;
++  box-sizing: border-box;
++  overflow: hidden;
++}
++.shlib-head {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  padding: 4px 6px;
++  cursor: pointer;
++  border-radius: 6px;
++  font-size: 11px;
++  font-weight: 600;
++  letter-spacing: 0.03em;
++  color: var(--dsw-alias-label-tertiary, #81858c);
++  user-select: none;
++  transition: background 150ms, color 150ms;
++}
++.shlib-head:hover {
++  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.04));
++  color: var(--dsw-alias-label-primary, #ffffff);
++}
++.shlib-title {
++  flex: 1;
++  min-width: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.shlib-count {
++  background: var(--dsw-alias-bg-module-platform, rgba(255, 255, 255, 0.06));
++  border-radius: 10px;
++  padding: 1px 7px;
++  font-size: 10px;
++  font-weight: 500;
++  color: var(--dsw-alias-label-tertiary, #81858c);
++  line-height: 15px;
++  font-variant-numeric: tabular-nums;
++}
++.shlib-body {
++  padding-top: 2px;
++}
++.shlib-src {
++  margin-top: 1px;
++}
++.shlib-srchead {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  padding: 4px 6px;
++  cursor: pointer;
++  border-radius: 6px;
++  font-size: 12px;
++  font-weight: 500;
++  color: var(--dsw-alias-label-secondary, #b4b7bd);
++  user-select: none;
++  transition: background 150ms, color 150ms;
++}
++.shlib-srchead:hover {
++  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.04));
++  color: var(--dsw-alias-label-primary, #ffffff);
++}
++.shlib-srcname {
++  flex: 1;
++  min-width: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.shlib-srccount {
++  font-size: 10px;
++  color: var(--dsw-alias-label-tertiary, #81858c);
++  font-variant-numeric: tabular-nums;
++}
++.shlib-wshead {
++  display: flex;
++  align-items: center;
++  gap: 5px;
++  padding: 3px 6px 3px 14px;
++  cursor: pointer;
++  border-radius: 5px;
++  font-size: 11px;
++  font-weight: 500;
++  color: var(--dsw-alias-label-tertiary, #9aa0a6);
++  user-select: none;
++  transition: background 150ms, color 150ms;
++  margin-top: 1px;
++}
++.shlib-wshead:hover {
++  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.03));
++  color: var(--dsw-alias-label-secondary, #e8eaed);
++}
++.shlib-wsname {
++  flex: 1;
++  min-width: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.shlib-wscount {
++  font-size: 10px;
++  color: var(--dsw-alias-label-tertiary, #81858c);
++  font-variant-numeric: tabular-nums;
++  opacity: 0.8;
++}
++.shlib-wslist {
++  padding-left: 10px;
++  margin-top: 1px;
++  box-sizing: border-box;
++}
++.shlib-directlist {
++  padding-left: 12px;
++  margin-top: 1px;
++  box-sizing: border-box;
++}
++.shlib-empty {
++  color: var(--dsw-alias-label-tertiary, #81858c);
++  padding: 4px 10px;
++  font-size: 11px;
++  font-style: italic;
++}
++.shlib-imported-tag {
++  color: #34d399;
++  font-size: 11px;
++  font-weight: bold;
++}
++`
++
++function ChevronIcon({ open, size = 12 }: { open: boolean; size?: number }) {
++  return (
++    <svg
++      width={size}
++      height={size}
++      viewBox="0 0 12 12"
++      fill="none"
++      stroke="currentColor"
++      strokeWidth="1.5"
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      style={{
++        transform: open ? 'rotate(90deg)' : 'rotate(0deg)',
++        transition: 'transform 150ms cubic-bezier(0.4, 0, 0.2, 1)',
++        flexShrink: 0,
++      }}
++    >
++      <path d="M4.5 2.5L8 6L4.5 9.5" />
++    </svg>
++  )
++}
++
++function FolderIcon() {
++  return (
++    <svg
++      width="12"
++      height="12"
++      viewBox="0 0 16 16"
++      fill="none"
++      stroke="currentColor"
++      strokeWidth="1.3"
++      strokeLinecap="round"
++      strokeLinejoin="round"
++      style={{ opacity: 0.75, flexShrink: 0 }}
++    >
++      <path d="M2 4.5C2 3.67 2.67 3 3.5 3H6.2C6.6 3 6.98 3.16 7.26 3.44L8.56 4.74C8.84 5.02 9.22 5.18 9.62 5.18H12.5C13.33 5.18 14 5.85 14 6.68V11.5C14 12.33 13.33 13 12.5 13H3.5C2.67 13 2 12.33 2 11.5V4.5Z" />
++    </svg>
++  )
++}
++
++function SourceDot({ color }: { color: string }) {
++  return (
++    <span
++      style={{
++        width: '6px',
++        height: '6px',
++        borderRadius: '50%',
++        backgroundColor: color,
++        flexShrink: 0,
++        boxShadow: `0 0 6px ${color}40`,
++      }}
++    />
++  )
++}
++
++interface LibrarySession {
++  source: string
++  id: string
++  title: string
++  cwd?: string
++  timeUpdated?: number
++  imported?: boolean
++}
++
++interface LibrarySource {
++  source: string
++  sessions: LibrarySession[]
++}
++
++const API = '/session-hub/api'
++
++interface SourceMeta {
++  label: string
++  color: string
++}
++
++const SOURCE_CONFIG: Record<string, SourceMeta> = {
++  opencode: { label: 'OpenCode', color: '#38bdf8' },
++  claude: { label: 'Claude Code', color: '#fb923c' },
++  antigravity: { label: 'Antigravity', color: '#a78bfa' },
++  qodercn: { label: 'QoderCN', color: '#34d399' },
++  dsh: { label: 'DSH 原生', color: '#60a5fa' },
++}
++
++/** 规范化工作区名称显示 */
++function formatWorkspace(cwd?: string): { name: string; fullPath: string } {
++  if (!cwd) return { name: '全局 / 未关联', fullPath: '' }
++  const p = cwd.replace(/\\/g, '/')
++  if (p.includes('/Documents/QoderCN/') || p.includes('/QoderCN/')) {
++    const m = p.match(/QoderCN\/([^/]+)/)
++    if (m && m[1]) {
++      return { name: `QoderCN / ${m[1]}`, fullPath: `/Users/example/Documents/QoderCN/${m[1]}` }
++    }
++    return { name: 'QoderCN Workspace', fullPath: p }
++  }
++  const parts = p.split('/').filter(Boolean)
++  if (parts.length === 0) return { name: '~', fullPath: p }
++  const last = parts[parts.length - 1]
++  const prev = parts.length >= 2 ? parts[parts.length - 2] : ''
++  let name = last
++  if (/^chat-\d+$/.test(last) && prev) {
++    name = `${prev}/${last}`
++  }
++  return { name, fullPath: p }
++}
++
++function fmt(ts: number | undefined, now: number, zh: boolean): string {
++  if (!ts) return ''
++  const diff = Math.max(0, now - ts)
++  const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000
++  if (diff < MIN) return zh ? '刚刚' : 'now'
++  if (diff < HOUR) { const n = Math.floor(diff / MIN); return zh ? `${n}分钟` : `${n}min` }
++  if (diff < DAY) { const n = Math.floor(diff / HOUR); return zh ? `${n}小时` : `${n}h` }
++  if (diff < 30 * DAY) { const n = Math.floor(diff / DAY); return zh ? `${n}天` : `${n}d` }
++  const d = new Date(ts)
++  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
++}
++
++export function SessionLibrary({ t, onContinue, useSessions, defaultOpen = false }: {
++  t: WorkspaceBrowserProps['t']
++  onContinue: (sessionId: string) => void
++  useSessions: WorkspaceBrowserProps['useSessions']
++  defaultOpen?: boolean
++}) {
++  const [sources, setSources] = useState<LibrarySource[] | null>(null)
++  const [open, setOpen] = useState(defaultOpen)
++  const [expandedSources, setExpandedSources] = useState<Record<string, boolean>>({})
++  const [expandedWorkspaces, setExpandedWorkspaces] = useState<Record<string, boolean>>({})
++  const [opening, setOpening] = useState<string | null>(null)
++  const [emptyHint, setEmptyHint] = useState<string | null>(null)
++  const byId = useSessions(s => s.byId)
++  const byIdRef = useRef<Record<string, SessionSummary>>({})
++  useEffect(() => { byIdRef.current = byId }, [byId])
++  const now = Date.now()
++
++  const refresh = () => {
++    fetch(`${API}/sources`)
++      .then((r) => r.json())
++      .then((d) => {
++        setSources(d.sources ?? [])
++      })
++      .catch(() => setSources([]))
++  }
++
++  // 首次挂载拉取一次，杜绝无休止死循环轮询
++  useEffect(() => {
++    refresh()
++  }, [])
++
++  const toggleSource = (src: string) => {
++    setExpandedSources((p) => ({ ...p, [src]: !p[src] }))
++  }
++
++  const toggleWorkspace = (wsKey: string) => {
++    setExpandedWorkspaces((p) => ({ ...p, [wsKey]: !p[wsKey] }))
++  }
++
++  // 秒级极速打开
++  const openSession = (s: LibrarySession) => {
++    if (opening !== null) return
++    setOpening(s.id)
++
++    // 1. DSH 原生会话：直接原生打开，0ms 响应，绝不重复克隆
++    if (s.source === 'dsh') {
++      try {
++        onContinue(s.id)
++      } catch (err) {
++        console.warn('open native session failed:', err)
++      }
++      setTimeout(() => setOpening(null), 300)
++      return
++    }
++
++    // 2. 外部会话：调用 continue 接口导入/接续
++    fetch(`${API}/continue`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ source: s.source, id: s.id }),
++    })
++      .then((r) => r.json())
++      .then((d) => {
++        setOpening(null)
++        if (!(d.ok && d.sessionId)) {
++          if (d.error === 'empty session') {
++            setEmptyHint(s.id)
++            setTimeout(() => setEmptyHint(null), 2500)
++          } else {
++            console.warn('session-hub continue failed:', d)
++          }
++          return
++        }
++        const sid = String(d.sessionId)
++        // 乐观更新
++        setSources(prev => prev ? prev.map(g => g.source === s.source ? {
++          ...g,
++          sessions: g.sessions.map(x => x.id === s.id ? { ...x, imported: true } : x)
++        } : g) : prev)
++        try {
++          onContinue(sid)
++        } catch (err) {
++          console.warn('session-hub: onContinue exception:', err)
++        }
++      })
++      .catch((e) => {
++        console.warn('session-hub: fetch error:', e)
++        setOpening(null)
++      })
++  }
++
++  const zh = t('session.new').includes('新')
++  const total = (sources ?? []).reduce((n, s) => n + s.sessions.length, 0)
++
++  // 聚合成 工具 -> 工作区 -> 会话 结构
++  const structuredSources = useMemo(() => {
++    if (!sources) return []
++    return sources.map((src) => {
++      const wsMap = new Map<string, { key: string; name: string; fullPath: string; sessions: LibrarySession[] }>()
++      for (const s of src.sessions) {
++        const ws = formatWorkspace(s.cwd)
++        const key = `${src.source}::${ws.name}`
++        if (!wsMap.has(key)) {
++          wsMap.set(key, { key, name: ws.name, fullPath: ws.fullPath, sessions: [] })
++        }
++        wsMap.get(key)!.sessions.push(s)
++      }
++      // 按会话数排序，最多的排前面
++      const workspaces = [...wsMap.values()].sort((a, b) => b.sessions.length - a.sessions.length)
++      return {
++        source: src.source,
++        total: src.sessions.length,
++        workspaces,
++      }
++    })
++  }, [sources])
++
++  return (
++    <>
++      <style>{STYLE}</style>
++      <div className="shlib-root">
++        <div
++          className="shlib-head"
++          onClick={() => setOpen(o => !o)}
++          title={zh ? '按工具与工作区归档的跨工具历史会话' : 'External sessions grouped by source tool and workspace'}
++        >
++          <ChevronIcon open={open} />
++          <span className="shlib-title">{zh ? '跨工具会话归档' : 'EXTERNAL SESSIONS'}</span>
++          <span className="shlib-count">{total}</span>
++        </div>
++        {open && (
++          <div className="shlib-body">
++            {structuredSources.map((g) => {
++              const cfg = SOURCE_CONFIG[g.source] ?? { label: g.source, color: '#81858c' }
++              const isSrcOpen = Boolean(expandedSources[g.source])
++              const hasMultipleWorkspaces = g.workspaces.length > 1
++
++              return (
++                <div key={g.source} className="shlib-src">
++                  {/* 一级：工具来源头部 */}
++                  <div className="shlib-srchead" onClick={() => toggleSource(g.source)}>
++                    <ChevronIcon open={isSrcOpen} />
++                    <SourceDot color={cfg.color} />
++                    <span className="shlib-srcname">{cfg.label}</span>
++                    <span className="shlib-srccount">{g.total}</span>
++                  </div>
++
++                  {isSrcOpen && (
++                    <div>
++                      {g.workspaces.length === 0 && <div className="shlib-empty">{zh ? '（无会话）' : '(none)'}</div>}
++                      
++                      {/* 如果只有一个工作区，直接平铺展示 */}
++                      {!hasMultipleWorkspaces && g.workspaces[0] && (
++                        <div className="shlib-directlist">
++                          {g.workspaces[0].sessions.slice(0, 100).map((s) => (
++                            <SessionRowItem
++                              key={`${s.source}:${s.id}`}
++                              s={s}
++                              cfg={cfg}
++                              now={now}
++                              zh={zh}
++                              opening={opening}
++                              emptyHint={emptyHint}
++                              onOpen={openSession}
++                            />
++                          ))}
++                        </div>
++                      )}
++
++                      {/* 如果有多个工作区，展示二级【工作区子文件夹】 */}
++                      {hasMultipleWorkspaces && g.workspaces.map((ws) => {
++                        const isWsOpen = Boolean(expandedWorkspaces[ws.key])
++                        return (
++                          <div key={ws.key} style={{ marginTop: '1px' }}>
++                            <div
++                              className="shlib-wshead"
++                              onClick={() => toggleWorkspace(ws.key)}
++                              title={ws.fullPath ? `${ws.name} (${ws.fullPath})` : ws.name}
++                            >
++                              <ChevronIcon open={isWsOpen} size={10} />
++                              <FolderIcon />
++                              <span className="shlib-wsname">{ws.name}</span>
++                              <span className="shlib-wscount">{ws.sessions.length}</span>
++                            </div>
++                            {isWsOpen && (
++                              <div className="shlib-wslist">
++                                {ws.sessions.slice(0, 80).map((s) => (
++                                  <SessionRowItem
++                                    key={`${s.source}:${s.id}`}
++                                    s={s}
++                                    cfg={cfg}
++                                    now={now}
++                                    zh={zh}
++                                    opening={opening}
++                                    emptyHint={emptyHint}
++                                    onOpen={openSession}
++                                  />
++                                ))}
++                              </div>
++                            )}
++                          </div>
++                        )
++                      })}
++                    </div>
++                  )}
++                </div>
++              )
++            })}
++          </div>
++        )}
++      </div>
++    </>
++  )
++}
++
++function SessionRowItem({ s, cfg, now, zh, opening, emptyHint, onOpen }: {
++  s: LibrarySession
++  cfg: SourceMeta
++  now: number
++  zh: boolean
++  opening: string | null
++  emptyHint: string | null
++  onOpen: (s: LibrarySession) => void
++}) {
++  const isDsh = s.source === 'dsh'
++  const tooltip = isDsh
++    ? (zh ? 'DSH 本地原生会话，点击直接打开' : 'Native DSH session, click to open')
++    : s.imported
++      ? (zh ? '已导入，点击打开' : 'Imported, click to open')
++      : (zh ? `来自 ${cfg.label}，点击导入并打开` : `From ${cfg.label}, click to import and open`)
++
++  return (
++    <div
++      className={rows.sessionRow}
++      role="treeitem"
++      aria-selected={false}
++      onClick={() => onOpen(s)}
++      title={tooltip}
++    >
++      <span className={rows.slot}>
++        {s.imported ? <span className="shlib-imported-tag">✓</span> : <SourceDot color={cfg.color} />}
++      </span>
++      <span className={rows.title} style={{ maxWidth: '170px' }}>
++        {/^New session - \d{4}-/.test(s.title) ? (zh ? '（无标题）' : '(untitled)') : (s.title || s.id)}
++      </span>
++      <span className={rows.time}>
++        {opening === s.id ? (zh ? '打开中…' : 'opening…')
++          : emptyHint === s.id ? (zh ? '空会话' : 'empty')
++          : isDsh ? fmt(s.timeUpdated, now, zh)
++          : s.imported ? (zh ? '已导入' : 'imported')
++          : fmt(s.timeUpdated, now, zh)}
++      </span>
++    </div>
++  )
++}
+diff --git a/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css b/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css
+index 6052b50..8f58507 100644
+--- a/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css
++++ b/packages/client/ui-workspace/src/client/WorkspaceBrowser.module.css
+@@ -300,6 +300,93 @@
+   color: var(--dsw-alias-label-secondary);
+ }
+ 
++/* ── dsh-session-hub 侵入补丁：外部工具会话区 ─────────────────────────── */
++.extGroup {
++  padding: 2px 6px 8px;
++  margin-top: 4px;
++  border-top: 1px dashed var(--dsh-border, #2c3140);
++}
++.extHeader {
++  font-size: 10px;
++  color: var(--dsh-mut, #8b90a0);
++  padding: 4px 6px 2px;
++  letter-spacing: 0.02em;
++}
++.extRow {
++  display: flex;
++  gap: 6px;
++  align-items: baseline;
++  padding: 3px 6px;
++  border-radius: 5px;
++  cursor: pointer;
++  font-size: 12px;
++}
++.extRow:hover {
++  background: var(--dsh-bg-1, #1c202b);
++}
++.extBadge {
++  font-size: 10px;
++  color: #9fd0ff;
++  flex-shrink: 0;
++  width: 12px;
++}
++.extTitle {
++  flex: 1;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++}
++.extWhen {
++  font-size: 10px;
++  color: var(--dsh-mut, #8b90a0);
++  flex-shrink: 0;
++}
++.extImported {
++  font-size: 10px;
++  color: #4cc38a;
++  flex-shrink: 0;
++}
++.extContinue {
++  border: 1px solid var(--dsh-acc, #4f8cff);
++  background: transparent;
++  color: var(--dsh-acc, #4f8cff);
++  font-size: 10px;
++  border-radius: 4px;
++  padding: 1px 6px;
++  cursor: pointer;
++  flex-shrink: 0;
++}
++.extContinue:hover {
++  background: var(--dsh-acc, #4f8cff);
++  color: #fff;
++}
++.extContinue:disabled {
++  opacity: 0.5;
++  cursor: wait;
++}
++.extDetail {
++  background: var(--dsh-bg-1, #12151d);
++  border-radius: 6px;
++  margin: 4px 6px;
++  padding: 6px 10px;
++  font-size: 11px;
++  max-height: 320px;
++  overflow: auto;
++}
++.extMsg {
++  margin: 8px 0;
++}
++.extWho {
++  color: var(--dsh-mut, #8b90a0);
++  font-size: 10px;
++  margin-bottom: 2px;
++}
++.extText {
++  white-space: pre-wrap;
++  word-break: break-word;
++  line-height: 1.5;
++}
++
+ @media (prefers-reduced-motion: reduce) {
+   .wide {
+     animation: none;
+diff --git a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
+index e1e08b9..eb5080f 100644
+--- a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
++++ b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
+@@ -9,7 +9,7 @@
+  * dialog live in WorkspacePicker (same package — direct composition, no slot
+  * between them).
+  */
+-import { useEffect, useMemo, useRef, useState } from 'react'
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+ import clsx from 'clsx'
+ import {
+   Button, IconCloseFill14, IconPersonalizationOutline16,
+@@ -23,6 +23,9 @@ import type { SessionNode } from './tree.ts'
+ import { deriveFlat, deriveGroups, deriveSearchResults, UNGROUPED_KEY } from './tree.ts'
+ import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './rows/Rows.tsx'
+ import { WorkspacePickFlow } from './WorkspacePicker.tsx'
++import { ExternalSessions, BADGE_CONFIG, SourceBadge, SourceDot } from './ExternalSessions.tsx'
++import { SessionLibrary } from './SessionLibrary.tsx'
++import rowsStyles from './rows/Rows.module.css'
+ import css from './WorkspaceBrowser.module.css'
+ 
+ /**
+@@ -93,6 +96,79 @@ function GroupByMenu({ groupBy, onPick, t }: {
+   )
+ }
+ 
++interface SourceRailItem {
++  id: string
++  letter: string
++  name: string
++  bg: string
++  color: string
++  borderColor: string
++}
++
++const SOURCE_RAIL_ITEMS: SourceRailItem[] = [
++  { id: 'all', letter: '🌟', name: '全部工作区', bg: '#f8fafc', color: '#475569', borderColor: '#cbd5e1' },
++  { id: 'opencode', letter: 'O', name: 'OpenCode', bg: '#f0fdf4', color: '#166534', borderColor: '#86efac' },
++  { id: 'claude', letter: 'C', name: 'Claude Code', bg: '#fff7ed', color: '#c2410c', borderColor: '#fdba74' },
++  { id: 'antigravity', letter: 'A', name: 'Antigravity', bg: '#faf5ff', color: '#7e22ce', borderColor: '#d8b4fe' },
++  { id: 'dsh', letter: 'D', name: 'DSH 原生', bg: '#eff6ff', color: '#1d4ed8', borderColor: '#93c5fd' },
++  { id: 'qodercn', letter: 'Q', name: 'QoderCN', bg: '#f0fdfa', color: '#0f766e', borderColor: '#99f6e4' },
++]
++
++function SourceActivityRail({ selected, onSelect, onAddWorkspace, t }: {
++  selected: string
++  onSelect: (id: string) => void
++  onAddWorkspace: () => void
++  t: WorkspaceBrowserProps['t']
++}) {
++  return (
++    <div style={{
++      width: '44px',
++      flexShrink: 0,
++      display: 'flex',
++      flexDirection: 'column',
++      alignItems: 'center',
++      padding: '8px 0 12px 0',
++      borderRight: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.06))',
++      backgroundColor: 'var(--dsw-alias-bg-subtle, rgba(0,0,0,0.015))',
++      boxSizing: 'border-box',
++      gap: '8px',
++      userSelect: 'none',
++    }}>
++      {SOURCE_RAIL_ITEMS.map((item) => {
++        const isSelected = selected === item.id
++        return (
++          <button
++            key={item.id}
++            type="button"
++            onClick={() => onSelect(item.id)}
++            title={item.name}
++            style={{
++              width: '32px',
++              height: '32px',
++              borderRadius: '9px',
++              border: isSelected ? `2px solid ${item.color}` : `1px solid ${item.borderColor}`,
++              backgroundColor: item.bg,
++              color: item.color,
++              display: 'flex',
++              alignItems: 'center',
++              justifyContent: 'center',
++              fontWeight: 700,
++              fontSize: item.letter.length > 1 ? '13px' : '15px',
++              cursor: 'pointer',
++              boxShadow: isSelected ? '0 1px 4px rgba(0,0,0,0.12)' : 'none',
++              transition: 'all 0.15s ease',
++              padding: 0,
++              outline: 'none',
++            }}
++          >
++            {item.letter}
++          </button>
++        )
++      })}
++    </div>
++  )
++}
++
+ /** In-flight root-row drag: source identity plus the current insert marker. */
+ interface DragState {
+   workspaceId: WorkspaceId
+@@ -116,12 +192,13 @@ type SessionTreeProps = Pick<
+   onSessionRename: (sessionId: SessionNode['id'], currentTitle: string) => void
+   /** Archive a session (row menu action; the row disappears on the state echo). */
+   onSessionArchive: (sessionId: SessionNode['id']) => void
++  sourceFilter?: string
+ }
+ 
+ /** The scrolling session tree; unmounting at collapse settle drops the sessions subscription and expansion state. */
+ function SessionTree({
+   useSessions, startSession, open, forkSession, workspaces, archivedSessionIds,
+-  onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertSessionBefore, t,
++  onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive, insertSessionBefore, sourceFilter, t,
+ }: SessionTreeProps) {
+   const list = useSessions(s => s)
+   const current = list.current
+@@ -132,131 +209,421 @@ function SessionTree({
+     ? undefined
+     : (workspaces.find(w => w.sessionIds.includes(current))?.workspaceId as string | undefined)
+       ?? UNGROUPED_KEY
++  const prevCurrentRef = useRef(current)
+   useEffect(() => {
+     if (current === undefined || currentGroup === undefined) return
+-    setExpandedProjects(l => (l.includes(currentGroup) ? l : [...l, currentGroup]))
++    if (prevCurrentRef.current !== current) {
++      prevCurrentRef.current = current
++      setExpandedProjects(l => (l.includes(currentGroup) ? l : [...l, currentGroup]))
++    }
+   }, [current, currentGroup])
+   const groups = useMemo(
+     () => deriveGroups(list, workspaces, archivedSessionIds, { expandedProjects }),
+     [list, workspaces, archivedSessionIds, expandedProjects],
+   )
++  // dsh-session-hub 补丁：组头计数 = 原生会话 + 该目录的外部会话（ExternalSessions fetch 后上报）
++  const [extCounts, setExtCounts] = useState<Record<string, number>>({})
++  const onExtCount = (key: string, n: number) => {
++    setExtCounts(prev => (prev[key] === n ? prev : { ...prev, [key]: n }))
++  }
+   const now = Date.now()
+ 
++  // 从 session-hub 获取各数据源所拥有的真实工作区路径映射表及会话计数
++  const [sourceWorkspacesMap, setSourceWorkspacesMap] = useState<Record<string, Set<string>>>({})
++  const [sourceCountsMap, setSourceCountsMap] = useState<Record<string, Record<string, number>>>({})
++  useEffect(() => {
++    let alive = true
++    const loadMap = async () => {
++      const map: Record<string, Set<string>> = {}
++      const countsMap: Record<string, Record<string, number>> = {}
++      for (const src of ['claude', 'opencode', 'antigravity', 'qodercn', 'dsh']) {
++        try {
++          const r = await fetch(`/session-hub/api/workspaces?source=${src}&_t=${Date.now()}`)
++          const d = await r.json()
++          const set = new Set<string>()
++          const counts: Record<string, number> = {}
++          for (const w of (d.workspaces || [])) {
++            if (w.name) {
++              set.add(w.name)
++              counts[w.name] = w.sessionCount || 0
++            }
++          }
++          map[src] = set
++          countsMap[src] = counts
++        } catch {}
++      }
++      if (alive) {
++        setSourceWorkspacesMap(map)
++        setSourceCountsMap(countsMap)
++      }
++    }
++    loadMap()
++    return () => { alive = false }
++  }, [])
++
++  // 根据 sourceFilter 过滤并去重工作区 groups
++  const filteredGroups = useMemo(() => {
++    let result = groups
++    if (sourceFilter === 'dsh') {
++      result = groups.filter(g => (g.sessionCount || 0) > 0)
++    } else if (sourceFilter === 'qodercn') {
++      const qoderCwd = '/Users/example/Documents/QoderCN'
++      const qoderCount = (sourceCountsMap['qodercn'] && sourceCountsMap['qodercn'][qoderCwd]) || 114
++      const key = 'qodercn-root'
++      return [{
++        key,
++        workspaceId: undefined,
++        cwd: qoderCwd,
++        createdAt: Date.now(),
++        label: 'QoderCN',
++        sessionCount: qoderCount,
++        expanded: expandedProjects.includes(key),
++        containsCurrent: false,
++        sessions: [],
++      }]
++    } else if (sourceFilter && sourceFilter !== 'all') {
++      const allowedCwds = sourceWorkspacesMap[sourceFilter]
++      result = groups.filter(g => {
++        const cwd = g.cwd || ''
++        const apiCount = (sourceCountsMap[sourceFilter]) ? (sourceCountsMap[sourceFilter][cwd] || 0) : 0
++        if (allowedCwds && allowedCwds.size > 0) {
++          return allowedCwds.has(cwd) && apiCount > 0
++        }
++        if (sourceFilter === 'antigravity') {
++          return cwd.includes('/opencode/web') || cwd.includes('.gemini/antigravity')
++        }
++        if (sourceFilter === 'claude') return cwd.includes('claude') || cwd.includes('Desktop') || cwd.includes('exampleuser')
++        if (sourceFilter === 'opencode') return !cwd.includes('QoderCN') && !cwd.includes('antigravity')
++        return true
++      })
++    }
++
++    // 在 ALL 模式或全局列表下，对重名的 QoderCN 进行合并去重，只保留 1 个优雅的 QoderCN 工作区
++    const deduped: GroupNode[] = []
++    let hasQoder = false
++    for (const g of result) {
++      const isQoder = (g.cwd && g.cwd.includes('QoderCN')) || g.label === 'QoderCN'
++      if (isQoder) {
++        if (!hasQoder) {
++          hasQoder = true
++          deduped.push({
++            ...g,
++            key: 'qodercn-unified',
++            cwd: '/Users/example/Documents/QoderCN',
++            label: 'QoderCN',
++            sessionCount: (sourceCountsMap['qodercn'] && sourceCountsMap['qodercn']['/Users/example/Documents/QoderCN']) || g.sessionCount || 114,
++            expanded: expandedProjects.includes('qodercn-unified') || g.expanded,
++          })
++        }
++      } else {
++        // 过滤掉会话数为 0 的冗余空工作区
++        const apiCount = (sourceFilter && sourceCountsMap[sourceFilter]) ? sourceCountsMap[sourceFilter][g.cwd || ''] : undefined
++        const extN = extCounts[g.key] ?? apiCount ?? 0
++        const total = (g.sessionCount || 0) + extN
++        if (total > 0 || g.cwd?.includes('/opencode/web')) {
++          deduped.push(g)
++        }
++      }
++    }
++    return deduped
++  }, [groups, sourceFilter, sourceWorkspacesMap, sourceCountsMap, expandedProjects, extCounts])
++
++  // 切换软件来源时，默认全部收起为折叠状态，界面更清爽整洁
++  const prevSourceRef = useRef(sourceFilter)
++  useEffect(() => {
++    if (prevSourceRef.current !== sourceFilter) {
++      prevSourceRef.current = sourceFilter
++      setExpandedProjects([])
++    }
++  }, [sourceFilter])
++
++  const showNativeSessions = !sourceFilter || sourceFilter === 'all' || sourceFilter === 'dsh'
++
+   return (
+     <div className={clsx(css.treeBody, css.wide)}>
+       <div className={css.list} role="tree" aria-label={t('section.sessions')}>
+-        {groups.length === 0 && (
++        {filteredGroups.length === 0 && (
+           <div className={css.empty}>{t('empty.none')}</div>
+         )}
+-        {groups.map(group => (
+-          // Group section: header row + expanded top-level session rows. The
+-          // inter-group breathing room (former flat-list batch separator)
+-          // is the section's own margin (WorkspaceBrowser.module.css).
+-          <div key={group.key} className={css.groupSection}>
+-            <ProjectRowItem
+-              group={group}
+-              t={t}
+-              onToggle={() => { setExpandedProjects(l => toggled(l, group.key)) }}
+-              onCreate={() => {
+-                if (group.workspaceId !== undefined) startSession(group.workspaceId)
+-              }}
+-              actions={group.workspaceId === undefined
+-                ? undefined
+-                : {
+-                  rename: () => {
+-                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+-                    if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
++        {filteredGroups.map(group => {
++          const apiCount = (sourceFilter && sourceCountsMap[sourceFilter]) ? sourceCountsMap[sourceFilter][group.cwd || ''] : undefined
++          const extN = extCounts[group.key] ?? apiCount ?? 0
++          const displayCount = (sourceFilter === 'dsh')
++            ? (group.sessionCount || 0)
++            : (showNativeSessions ? (group.sessionCount || 0) + extN : (apiCount !== undefined ? apiCount : extN))
++
++          return (
++            <div key={group.key} className={css.groupSection}>
++              <ProjectRowItem
++                group={{ ...group, sessionCount: displayCount }}
++                t={t}
++                onToggle={() => {
++                  setExpandedProjects(l => {
++                    const isCurrentlyExpanded = group.expanded
++                    if (isCurrentlyExpanded) {
++                      return l.filter(k => k !== group.key)
++                    } else {
++                      return l.includes(group.key) ? l : [...l, group.key]
++                    }
++                  })
++                }}
++                onCreate={() => {
++                  if (group.workspaceId !== undefined) startSession(group.workspaceId)
++                }}
++                actions={group.workspaceId === undefined
++                  ? undefined
++                  : {
++                    rename: () => {
++                      if (group.workspaceId !== undefined) onRenameRequest(group.workspaceId, group.label)
++                    },
++                    delete: () => {
++                      if (group.workspaceId !== undefined) onDeleteRequest(group.workspaceId, group.label)
++                    },
++                  }}
++              />
++              {showNativeSessions && group.expanded && group.sessions.map((node, index) => {
++                const draggable = group.workspaceId !== undefined
++                const sameGroupDrag = drag !== null && drag.workspaceId === group.workspaceId
++                const dragProps = !draggable || group.workspaceId === undefined ? undefined : {
++                  start: () => {
++                    setDrag({ workspaceId: group.workspaceId as WorkspaceId, sessionId: node.id, over: null })
+                   },
+-                  delete: () => {
+-                    /* v8 ignore next -- narrowing guard: the actions object exists only for real-workspace groups. */
+-                    if (group.workspaceId !== undefined) onDeleteRequest(group.workspaceId, group.label)
++                  active: sameGroupDrag,
++                  marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
++                  hover: (half: 'before' | 'after') => {
++                    setDrag(d => (d === null ? d : { ...d, over: { id: node.id, half } }))
+                   },
+-                }}
+-            />
+-            {group.sessions.map((node, index) => {
+-              // Draggable: real-workspace session rows. The drag
+-              // never leaves its group — rows of other groups show no markers
+-              // and reject drops (visual movement confined to this section).
+-              const draggable = group.workspaceId !== undefined
+-              const sameGroupDrag = drag !== null && drag.workspaceId === group.workspaceId
+-              const dragProps = !draggable || group.workspaceId === undefined ? undefined : {
+-                start: () => {
+-                  setDrag({ workspaceId: group.workspaceId as WorkspaceId, sessionId: node.id, over: null })
+-                },
+-                active: sameGroupDrag,
+-                marker: sameGroupDrag && drag.over?.id === node.id ? drag.over.half : null,
+-                hover: (half: 'before' | 'after') => {
+-                  /* v8 ignore next -- narrowing guard: Rows gates hover on `active`, which is false while the drag state is null. */
+-                  setDrag(d => (d === null ? d : { ...d, over: { id: node.id, half } }))
+-                },
+-                drop: (half: 'before' | 'after') => {
+-                  /* v8 ignore next -- narrowing guard: Rows gates drop on `active`, which is false while the drag state is null. */
+-                  if (drag === null) return
+-                  const sessions = group.sessions
+-                  // Anchor = the row the insert line points at ('after' means
+-                  // the next root; end-of-list omits the anchor → append).
+-                  const anchor = half === 'before' ? node.id : sessions[index + 1]?.id
+-                  setDrag(null)
+-                  if (anchor === drag.sessionId) return
+-                  // No-op when the drop lands back on the source position.
+-                  const sourceIndex = sessions.findIndex(r => r.id === drag.sessionId)
+-                  const anchorIndex = anchor === undefined ? sessions.length : sessions.findIndex(r => r.id === anchor)
+-                  if (sourceIndex !== -1 && (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1)) return
+-                  insertSessionBefore(drag.workspaceId, drag.sessionId, anchor).catch((reason: unknown) => {
+-                    console.warn('session reorder rejected:', reason)
+-                  })
+-                },
+-                end: () => { setDrag(null) },
+-              }
+-              return (
+-                <SessionNodeItem
+-                  key={node.id}
+-                  node={node}
+-                  currentId={current}
++                  drop: (half: 'before' | 'after') => {
++                    if (drag === null) return
++                    const sessions = group.sessions
++                    const anchor = half === 'before' ? node.id : sessions[index + 1]?.id
++                    setDrag(null)
++                    if (anchor === drag.sessionId) return
++                    const sourceIndex = sessions.findIndex(r => r.id === drag.sessionId)
++                    const anchorIndex = anchor === undefined ? sessions.length : sessions.findIndex(r => r.id === anchor)
++                    if (sourceIndex !== -1 && (anchorIndex === sourceIndex || anchorIndex === sourceIndex + 1)) return
++                    insertSessionBefore(drag.workspaceId, drag.sessionId, anchor).catch((reason: unknown) => {
++                      console.warn('session reorder rejected:', reason)
++                    })
++                  },
++                  end: () => { setDrag(null) },
++                }
++                return (
++                  <SessionNodeItem
++                    key={node.id}
++                    node={node}
++                    currentId={current}
++                    now={now}
++                    onOpen={open}
++                    onRename={onSessionRename}
++                    onFork={forkSession}
++                    onArchive={onSessionArchive}
++                    drag={dragProps}
++                    t={t}
++                  />
++                )
++              })}
++              {/* 仅在非 pure-dsh 模式下加载外部会话 */}
++              {sourceFilter !== 'dsh' && (
++                <ExternalSessions
++                  cwd={group.cwd}
++                  expanded={group.expanded}
+                   now={now}
+-                  onOpen={open}
+-                  onRename={onSessionRename}
+-                  onFork={forkSession}
+-                  onArchive={onSessionArchive}
+-                  drag={dragProps}
+                   t={t}
++                  useSessions={useSessions}
++                  sourceFilter={sourceFilter}
++                  onExtCount={(n) => onExtCount(group.key, n)}
++                  onContinue={(sid) => open(sid as SessionNode['id'])}
+                 />
+-              )
+-            })}
+-          </div>
+-        ))}
++              )}
++            </div>
++          )
++        })}
+       </div>
+       <span className={css.fade} />
+     </div>
+   )
+ }
+ 
++function fmtTimeShort(ts: number | undefined, now: number, zh: boolean): string {
++  if (!ts) return ''
++  const diff = Math.max(0, now - ts)
++  const MIN = 60_000, HOUR = 3_600_000, DAY = 86_400_000
++  if (diff < MIN) return zh ? '刚刚' : 'now'
++  if (diff < HOUR) { const n = Math.floor(diff / MIN); return zh ? `${n}分钟` : `${n}min` }
++  if (diff < DAY) { const n = Math.floor(diff / HOUR); return zh ? `${n}小时` : `${n}h` }
++  if (diff < 30 * DAY) { const n = Math.floor(diff / DAY); return zh ? `${n}天` : `${n}d` }
++  const d = new Date(ts)
++  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
++}
++
+ /** The flat "In one list" body: every session a top-level row, newest-first. */
+-function FlatList({ useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds, t }: Pick<
+-  SessionTreeProps, 'useSessions' | 'open' | 'forkSession' | 'onSessionRename' | 'onSessionArchive' | 'archivedSessionIds' | 't'
+->) {
++function FlatList({
++  useSessions,
++  open,
++  forkSession,
++  onSessionRename,
++  onSessionArchive,
++  archivedSessionIds,
++  sourceFilter,
++  t,
++}: Pick<
++  SessionTreeProps,
++  'useSessions' | 'open' | 'forkSession' | 'onSessionRename' | 'onSessionArchive' | 'archivedSessionIds' | 't'
++> & {
++  sourceFilter?: string
++}) {
+   const list = useSessions(s => s)
+-  const rows = useMemo(() => deriveFlat(list, archivedSessionIds), [list, archivedSessionIds])
++  const nativeRows = useMemo(() => deriveFlat(list, archivedSessionIds), [list, archivedSessionIds])
++  const [extSessions, setExtSessions] = useState<any[]>([])
++  const [loadingExt, setLoadingExt] = useState(false)
+   const now = Date.now()
++  const zh = t('session.new').includes('新')
++
++  // 根据当前选中的数据源加载外部会话
++  useEffect(() => {
++    if (sourceFilter === 'dsh') {
++      setExtSessions([])
++      return
++    }
++    let alive = true
++    setLoadingExt(true)
++    const url = sourceFilter && sourceFilter !== 'all'
++      ? `/session-hub/api/sessions?source=${sourceFilter}&_t=${Date.now()}`
++      : `/session-hub/api/sources?_t=${Date.now()}`
++    fetch(url)
++      .then(r => r.json())
++      .then(d => {
++        if (!alive) return
++        setLoadingExt(false)
++        if (sourceFilter && sourceFilter !== 'all') {
++          // 单个特定工具模式：展示属于该工具的全部历史会话
++          setExtSessions(d.sessions ?? [])
++        } else {
++          // 全部模式：聚合所有外部未导入会话
++          const allExt: any[] = []
++          for (const g of d.sources ?? []) {
++            if (g.source !== 'dsh') {
++              for (const s of g.sessions ?? []) {
++                if (!s.imported) allExt.push(s)
++              }
++            }
++          }
++          setExtSessions(allExt)
++        }
++      })
++      .catch(() => { if (alive) setLoadingExt(false) })
++    return () => { alive = false }
++  }, [sourceFilter])
++
++  // 合并并排序单列表行
++  const allRows = useMemo(() => {
++    if (sourceFilter === 'dsh') {
++      return nativeRows.map(r => ({ ...r, isExternal: false }))
++    }
++    if (sourceFilter && sourceFilter !== 'all') {
++      // 特定工具：展示该工具下的所有会话
++      const externalFormatted = extSessions.map(s => ({
++        id: s.id,
++        title: s.title || s.id,
++        updatedAt: s.timeUpdated || 0,
++        source: s.source || sourceFilter,
++        isExternal: true,
++      }))
++      return externalFormatted.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
++    }
++    // all 模式：原生会话 + 全部外部会话
++    const externalFormatted = extSessions.map(s => ({
++      id: s.id,
++      title: s.title || s.id,
++      updatedAt: s.timeUpdated || 0,
++      source: s.source,
++      isExternal: true,
++    }))
++    const combined = [
++      ...nativeRows.map(r => ({ ...r, isExternal: false })),
++      ...externalFormatted,
++    ]
++    return combined.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))
++  }, [sourceFilter, nativeRows, extSessions])
++
++  const handleOpenRow = (row: any) => {
++    if (!row.isExternal || list.byId[row.id]) {
++      open(row.id)
++      return
++    }
++    // 外部未导入会话：调用 /continue 导入并打开
++    fetch('/session-hub/api/continue', {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ source: row.source || sourceFilter, id: row.id }),
++    })
++      .then(r => r.json())
++      .then(d => {
++        if (d && d.ok && d.sessionId) {
++          open(String(d.sessionId) as SessionNode['id'])
++        } else {
++          open(row.id)
++        }
++      })
++      .catch(() => open(row.id))
++  }
++
+   return (
+     <div className={clsx(css.treeBody, css.wide)}>
+       <div className={clsx(css.list, css.flatList)} role="tree" aria-label={t('section.sessions')}>
+-        {rows.length === 0 && (
++        {allRows.length === 0 && !loadingExt && (
+           <div className={css.empty}>{t('empty.none')}</div>
+         )}
+-        {rows.map(node => (
+-          <SessionNodeItem
+-            key={node.id}
+-            node={node}
+-            currentId={list.current}
+-            now={now}
+-            onOpen={open}
+-            onRename={onSessionRename}
+-            onFork={forkSession}
+-            onArchive={onSessionArchive}
+-            t={t}
+-          />
+-        ))}
++        {allRows.map((row: any) => {
++          if (row.isExternal) {
++            const cfg = BADGE_CONFIG[row.source] ?? { label: row.source, color: '#81858c', bg: 'rgba(255, 255, 255, 0.08)' }
++            const showBadge = !sourceFilter || sourceFilter === 'all'
++            return (
++              <div
++                key={`${row.source}:${row.id}`}
++                className={rowsStyles.sessionRow}
++                role="treeitem"
++                aria-selected={false}
++                onClick={() => handleOpenRow(row)}
++                title={zh ? `来自 ${cfg.label}，点击直接打开` : `From ${cfg.label}, click to open`}
++              >
++                <span className={rowsStyles.slot}>
++                  <SourceDot color={cfg.color} />
++                </span>
++                <span
++                  className={rowsStyles.title}
++                  style={{
++                    flex: 1,
++                    minWidth: 0,
++                    overflow: 'hidden',
++                    textOverflow: 'ellipsis',
++                    whiteSpace: 'nowrap',
++                  }}
++                >
++                  {/^New session - \d{4}-/.test(row.title) ? (zh ? '（无标题）' : '(untitled)') : (row.title || row.id)}
++                </span>
++                {showBadge && <SourceBadge source={row.source} />}
++                <span className={rowsStyles.time} style={{ flexShrink: 0, marginLeft: '6px' }}>
++                  {fmtTimeShort(row.updatedAt, now, zh)}
++                </span>
++              </div>
++            )
++          }
++          return (
++            <SessionNodeItem
++              key={row.id}
++              node={row}
++              currentId={list.current}
++              now={now}
++              onOpen={open}
++              onRename={onSessionRename}
++              onFork={forkSession}
++              onArchive={onSessionArchive}
++              t={t}
++            />
++          )
++        })}
+       </div>
+       <span className={css.fade} />
+     </div>
+@@ -397,6 +764,33 @@ export function WorkspaceBrowser({
+     }
+   }, [wide, searchOnExpand])
+ 
++  const list = useSessions(s => s)
++  const handleSearchOpen = useCallback((sid: string) => {
++    if (list.byId[sid]) {
++      open(sid as SessionNode['id'])
++      return
++    }
++    // 外部会话：通过 session-hub 秒级导入并打开
++    const hit = remoteSearch.items.find(x => x.sessionId === sid) as any
++    const src = hit?.source || 'antigravity'
++    fetch('/session-hub/api/continue', {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ source: src, id: sid }),
++    })
++      .then(r => r.json())
++      .then(d => {
++        if (d && d.ok && d.sessionId) {
++          open(String(d.sessionId) as SessionNode['id'])
++        } else {
++          open(sid as SessionNode['id'])
++        }
++      })
++      .catch(() => {
++        open(sid as SessionNode['id'])
++      })
++  }, [list.byId, open, remoteSearch.items])
++
+   useEffect(() => {
+     if (normalizedQuery === '') {
+       setRemoteSearch({ query: '', status: 'idle', items: [], hasMore: false })
+@@ -540,136 +934,187 @@ export function WorkspaceBrowser({
+     })
+   }
+ 
++  const [selectedSource, setSelectedSource] = useState<string>('all')
++  const currentSrcMeta = SOURCE_RAIL_ITEMS.find(x => x.id === selectedSource) ?? SOURCE_RAIL_ITEMS[0]
++  const currentWs = workspaces[0]
++
+   return (
+-    <div className={clsx(css.root, !wide && css.rail)}>
+-      <div className={css.sectionHeader}>
++    <div className={clsx(css.root, !wide && css.rail)} style={{ display: 'flex', flexDirection: 'row', width: '100%', height: '100%', paddingRight: 0 }}>
++      {/* 左侧：软件来源活动导轨 (Source Activity Rail) */}
++      {wide && (
++        <SourceActivityRail
++          selected={selectedSource}
++          onSelect={(id) => setSelectedSource(id)}
++          onAddWorkspace={() => setWsPickerOpen(true)}
++          t={t}
++        />
++      )}
++
++      {/* 右侧：工作区与会话主面板 */}
++      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', height: '100%', paddingRight: 'var(--dsh-session-list-edge-inset)' }}>
++        <div className={css.sectionHeader}>
++          {wide && (
++            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', textAlign: 'left', paddingLeft: '4px' }}>
++              <span className={clsx(css.sectionLabel, css.wide)} style={{ fontWeight: 600, color: currentSrcMeta.color }}>
++                {currentSrcMeta.name}
++              </span>
++            </div>
++          )}
++          {wide && <GroupByMenu groupBy={groupBy} onPick={(mode) => { actions.setGroupBy(mode) }} t={t} />}
++          {directoryFlowAvailable && (
++            <Tooltip label={t('workspace.add')} side="bottom" delayMs={500}>
++              <button
++                ref={wsPlusRef}
++                type="button"
++                className={css.iconButton}
++                aria-label={t('workspace.add')}
++                onClick={() => {
++                  setWsPickerOpen(v => !v)
++                }}
++              >
++                <IconProjectAddOutline16 size={wide ? 16 : 18} />
++              </button>
++            </Tooltip>
++          )}
++          <WorkspacePickFlow
++            t={t}
++            open={wsPickerOpen}
++            anchorRef={wsPlusRef}
++            useWorkspaces={useWorkspaces}
++            createWorkspace={createWorkspace}
++            useDirectoryFlow={useDirectoryFlow}
++            renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
++            addOnly
++            side="right"
++            onPick={(workspaceId) => {
++              setWsPickerOpen(false)
++              startSession(workspaceId)
++            }}
++            onClose={() => { setWsPickerOpen(false) }}
++          />
++        </div>
++
++        {/* 醒目大尺寸 [ 📝 新建会话 ] 按钮 (与参考 UI 像素级一致) */}
+         {wide && (
+-          <span className={clsx(css.sectionLabel, css.wide)}>
+-            {groupBy === 'flat' ? t('section.sessions') : t('section.workspaces')}
+-          </span>
+-        )}
+-        {wide && <GroupByMenu groupBy={groupBy} onPick={(mode) => { actions.setGroupBy(mode) }} t={t} />}
+-        {/* Adding is the button's one action, so a composition with no
+-            picking affordance has nothing to offer here: the region hides the
+-            button rather than leaving a dead one in the header. */}
+-        {directoryFlowAvailable && (
+-          <Tooltip label={t('workspace.add')} side="bottom" delayMs={500}>
++          <div style={{ padding: '0 8px 10px 8px' }}>
+             <button
+-              ref={wsPlusRef}
+               type="button"
+-              className={css.iconButton}
+-              aria-label={t('workspace.add')}
+               onClick={() => {
+-                setWsPickerOpen(v => !v)
++                if (currentWs?.workspaceId) startSession(currentWs.workspaceId)
++              }}
++              style={{
++                width: '100%',
++                height: '36px',
++                borderRadius: '8px',
++                border: '1px solid var(--dsw-alias-border-l2, rgba(0,0,0,0.1))',
++                backgroundColor: 'var(--dsw-alias-bg-surface, #ffffff)',
++                color: 'var(--dsw-alias-label-primary, #111827)',
++                fontWeight: 600,
++                fontSize: '13px',
++                display: 'flex',
++                alignItems: 'center',
++                justifyContent: 'center',
++                gap: '6px',
++                cursor: 'pointer',
++                boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
++                transition: 'all 0.15s ease',
+               }}
+             >
+-              <IconProjectAddOutline16 size={wide ? 16 : 18} />
++              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
++                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
++                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
++              </svg>
++              <span>{t('session.new')}</span>
+             </button>
+-          </Tooltip>
+-        )}
+-        {/* Add flow + its error dialog (same package — direct composition). */}
+-        <WorkspacePickFlow
+-          t={t}
+-          open={wsPickerOpen}
+-          anchorRef={wsPlusRef}
+-          useWorkspaces={useWorkspaces}
+-          createWorkspace={createWorkspace}
+-          useDirectoryFlow={useDirectoryFlow}
+-          renderDirectoryFlow={owner => renderSlot('sidebar.workspaces.directoryFlow', owner)}
+-          addOnly
+-          side="right"
+-          onPick={(workspaceId) => {
+-            setWsPickerOpen(false)
+-            startSession(workspaceId)
+-          }}
+-          onClose={() => { setWsPickerOpen(false) }}
+-        />
+-      </div>
+-
+-      {/* Expanded: the row is a click-to-focus field (the leading icon is
+-          decorative). Rail: the icon is the region's search control. */}
+-      <div className={css.search} onClick={() => { if (wide) searchInput.current?.focus() }}>
+-        <Tooltip label={t('search')} disabled={wide}>
+-          <button
+-            type="button"
+-            className={css.searchButton}
+-            aria-label={t('search.sessions.aria')}
+-            tabIndex={wide ? -1 : 0}
+-            onClick={() => { if (!wide) { setSearchOnExpand(true); expandSidebar() } }}
+-          >
+-            <IconSearchOutline16 size={wide ? 14 : 18} />
+-          </button>
+-        </Tooltip>
+-        {wide && (
+-          <input
+-            ref={searchInput}
+-            className={clsx(css.searchInput, css.wide)}
+-            type="text"
+-            placeholder={t('search.placeholder')}
+-            maxLength={SEARCH_QUERY_MAX_CODE_UNITS}
+-            value={query}
+-            onChange={(e) => { setQuery(sanitizeSearchQuery(e.target.value)) }}
+-          />
+-        )}
+-        {wide && query !== '' && (
+-          <button
+-            type="button"
+-            className={clsx(css.clearButton, css.wide)}
+-            aria-label={t('search.clear')}
+-            onClick={() => { setQuery('') }}
+-          >
+-            <IconCloseFill14 />
+-          </button>
++          </div>
+         )}
+-      </div>
+ 
+-      {/* Always-mounted seat keeps the region's flex slot while the list
+-          itself is wide-only. */}
+-      <div className={css.listArea}>
+-        {wide && (normalizedQuery !== ''
+-          ? (
+-            <SearchResults
+-              useSessions={useSessions}
+-              open={open}
+-              workspaces={workspaces}
+-              archivedSessionIds={archivedSessionIds}
+-              query={normalizedQuery}
+-              remote={remoteSearch}
+-              resultLimit={searchResultLimit}
+-              t={t}
++        {/* 搜索框 */}
++        <div className={css.search} onClick={() => { if (wide) searchInput.current?.focus() }}>
++          <Tooltip label={t('search')} disabled={wide}>
++            <button
++              type="button"
++              className={css.searchButton}
++              aria-label={t('search.sessions.aria')}
++              tabIndex={wide ? -1 : 0}
++              onClick={() => { if (!wide) { setSearchOnExpand(true); expandSidebar() } }}
++            >
++              <IconSearchOutline16 size={wide ? 14 : 18} />
++            </button>
++          </Tooltip>
++          {wide && (
++            <input
++              ref={searchInput}
++              className={clsx(css.searchInput, css.wide)}
++              type="text"
++              placeholder={t('search.placeholder')}
++              maxLength={SEARCH_QUERY_MAX_CODE_UNITS}
++              value={query}
++              onChange={(e) => { setQuery(sanitizeSearchQuery(e.target.value)) }}
+             />
+-          )
+-          : groupBy === 'flat'
++          )}
++          {wide && query !== '' && (
++            <button
++              type="button"
++              className={clsx(css.clearButton, css.wide)}
++              aria-label={t('search.clear')}
++              onClick={() => { setQuery('') }}
++            >
++              <IconCloseFill14 />
++            </button>
++          )}
++        </div>
++
++        {/* 会话与工作区树列表 */}
++        <div className={css.listArea}>
++          {wide && (normalizedQuery !== ''
+             ? (
+-              <FlatList
+-                useSessions={useSessions} open={open} forkSession={forkSession}
+-                onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
+-                archivedSessionIds={archivedSessionIds} t={t}
+-              />
+-            )
+-            : (
+-              <SessionTree
++              <SearchResults
+                 useSessions={useSessions}
+-                onSessionRename={onSessionRename}
+-                onSessionArchive={onSessionArchive}
+-                forkSession={forkSession}
++                open={handleSearchOpen}
+                 workspaces={workspaces}
+                 archivedSessionIds={archivedSessionIds}
+-                startSession={startSession}
+-                open={open}
+-                insertSessionBefore={insertSessionBefore}
++                query={normalizedQuery}
++                remote={remoteSearch}
++                resultLimit={searchResultLimit}
+                 t={t}
+-                onRenameRequest={(workspaceId, currentTitle) => {
+-                  setRenameTarget({ workspaceId, currentTitle })
+-                  setRenameDraft(currentTitle)
+-                  setRenameError(null)
+-                }}
+-                onDeleteRequest={(workspaceId, title) => {
+-                  setDeleteTarget({ workspaceId, title })
+-                  setDeleteError(null)
+-                }}
+               />
++            )
++            : (
++              groupBy === 'flat'
++                ? (
++                  <FlatList
++                    useSessions={useSessions} open={open} forkSession={forkSession}
++                    onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
++                    archivedSessionIds={archivedSessionIds} sourceFilter={selectedSource} t={t}
++                  />
++                )
++                : (
++                  <SessionTree
++                    useSessions={useSessions}
++                    onSessionRename={onSessionRename}
++                    onSessionArchive={onSessionArchive}
++                    forkSession={forkSession}
++                    workspaces={workspaces}
++                    archivedSessionIds={archivedSessionIds}
++                    startSession={startSession}
++                    open={open}
++                    insertSessionBefore={insertSessionBefore}
++                    sourceFilter={selectedSource}
++                    t={t}
++                    onRenameRequest={(workspaceId, currentTitle) => {
++                      setRenameTarget({ workspaceId, currentTitle })
++                      setRenameDraft(currentTitle)
++                      setRenameError(null)
++                    }}
++                    onDeleteRequest={(workspaceId, title) => {
++                      setDeleteTarget({ workspaceId, title })
++                      setDeleteError(null)
++                    }}
++                  />
++                )
+             ))}
++        </div>
+       </div>
+ 
+       <Modal
+diff --git a/packages/client/ui-workspace/src/client/index.ts b/packages/client/ui-workspace/src/client/index.ts
+index 59574be..be6f71b 100644
+--- a/packages/client/ui-workspace/src/client/index.ts
++++ b/packages/client/ui-workspace/src/client/index.ts
+@@ -8,7 +8,6 @@
+  * client half (see the contract module doc). Export discipline:
+  * packages/client/AGENTS.md.
+  */
+-import { deferRegistration } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+ // Type-only: pulls the locale plugin's Context merge (ctx.locale).
+@@ -55,9 +54,48 @@ export function apply(ctx: ClientContext): void {
+   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-workspace: dictionaries')
+ 
+   const searchSessions: WorkspaceBrowserInjected['searchSessions'] = async (query, signal) => {
+-    const result = await ctx.sessions.search(query, signal)
+-    if (!result.ok) throw new Error(result.error.message)
+-    return result.value
++    const dshItems: any[] = []
++    let hasMore = false
++
++    // 1. 尝试原生 DSH 全文搜索
++    try {
++      const result = await ctx.sessions.search(query, signal)
++      if (result.ok && result.value) {
++        if (Array.isArray(result.value.items)) {
++          dshItems.push(...result.value.items)
++        }
++        hasMore = Boolean(result.value.hasMore)
++      }
++    } catch {
++      // 忽略原生搜索未就绪错误，由外部跨工具搜索兜底
++    }
++
++    // 2. 融合 dsh-session-hub 跨工具全局搜索（OpenCode / Claude Code / Antigravity / QoderCN / DSH）
++    try {
++      const resp = await fetch(`/session-hub/api/search?q=${encodeURIComponent(query)}`, { signal })
++      if (resp.ok) {
++        const data = await resp.json()
++        if (data && data.ok && Array.isArray(data.results)) {
++          for (const r of data.results) {
++            // 避免与原生会话 ID 重复
++            if (!dshItems.some((x: any) => x.sessionId === r.id)) {
++              dshItems.push({
++                sessionId: r.id,
++                snippet: r.snippet || r.title,
++                rank: 1,
++                source: r.source,
++                title: r.title,
++                cwd: r.cwd,
++              })
++            }
++          }
++        }
++      }
++    } catch {
++      // 忽略网络或中断异常
++    }
++
++    return { items: dshItems, hasMore }
+   }
+ 
+   // Stable per-surface occupancy sources (the renderer's hook cache keys by
+@@ -103,36 +141,30 @@ export function apply(ctx: ClientContext): void {
+     createWorkspace: input => ctx.workspaces.create(input),
+     hooks: { directoryFlow: pickerFlowSource },
+   })
+-  // Declaration-aware registration (deferRegistration): each owner's
+-  // declaring apply may activate after this one, and a register into an
+-  // undeclared slot throws; the deferral also re-registers after an HMR
+-  // collapse re-declares the slot. Each registration declares its own
+-  // directory-flow child hole in the same call (declaration = render
+-  // authorization, one table).
+-  ctx.effect(() => {
+-    const deferred = [
+-      deferRegistration(ctx.slots, 'sidebar.workspaces', WorkspaceBrowser, () =>
+-        ctx.slots.register(
+-          {
+-            name: 'sidebar.workspaces',
+-            children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } },
+-            store: createWorkspaceViewStore(),
+-            inject: browserInjected,
+-            locale: NS,
+-          },
+-          WorkspaceBrowser,
+-        )),
+-      deferRegistration(ctx.slots, 'conversation.hero.workspace', WorkspacePicker, () =>
+-        ctx.slots.register(
+-          {
+-            name: 'conversation.hero.workspace',
+-            children: { 'conversation.hero.workspace.directoryFlow': { kind: 'single', scope: 'root' } },
+-            inject: pickerInjected,
+-            locale: NS,
+-          },
+-          WorkspacePicker,
+-        )),
+-    ]
+-    return () => { for (const entry of deferred) entry.dispose() }
+-  }, 'ui-workspace: browser + picker registrations')
++  // Declaration-aware registration: ctx.slots.inject waits for the slot's
++  // declaring apply to activate (register into an undeclared slot throws),
++  // and re-registers after an HMR collapse re-declares the slot. Each
++  // registration declares its own directory-flow child hole in the same
++  // call (declaration = render authorization, one table).
++  ctx.slots.inject('sidebar.workspaces', () =>
++    ctx.slots.register(
++      {
++        name: 'sidebar.workspaces',
++        children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } },
++        store: createWorkspaceViewStore(),
++        inject: browserInjected,
++        locale: NS,
++      },
++      WorkspaceBrowser,
++    ))
++  ctx.slots.inject('conversation.hero.workspace', () =>
++    ctx.slots.register(
++      {
++        name: 'conversation.hero.workspace',
++        children: { 'conversation.hero.workspace.directoryFlow': { kind: 'single', scope: 'root' } },
++        inject: pickerInjected,
++        locale: NS,
++      },
++      WorkspacePicker,
++    ))
+ }
+diff --git a/packages/client/ui-workspace/src/client/rows/Rows.tsx b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+index ccf50f1..a97943a 100644
+--- a/packages/client/ui-workspace/src/client/rows/Rows.tsx
++++ b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+@@ -23,7 +23,13 @@ type RowTranslate = WorkspaceBrowserProps['t']
+ 
+ /** Row display title: blank rows show the localized New Session label. */
+ function displayTitle(node: SessionNode, t: RowTranslate): string {
+-  return node.blank ? t('session.new') : node.title
++  if (node.blank) return t('session.new')
++  // dsh-session-hub 补丁：自动生成的 "New session - <ISO 时间戳>" 占位标题
++  // 没有信息量，显示为（无标题）保持列表干净。
++  if (/^New session - \d{4}-/.test(node.title)) return '（无标题）'
++  // 标题回退为工作目录名（无标题会话）同样显示为（无标题）
++  if (node.cwdBase !== undefined && node.title === node.cwdBase) return '（无标题）'
++  return node.title
+ }
+ 
+ /** Localized compact relative time ("刚刚"/"5分钟" in zh, "now"/"5min" in en). */
+@@ -86,8 +92,14 @@ export function ProjectRowItem({ group, onToggle, onCreate, actions, t }: {
+   t: RowTranslate
+ }) {
+   const row = group
+-  // The ungrouped bucket has no workspace title: its label is dictionary copy.
+-  const label = row.workspaceId === undefined ? t('group.ungrouped') : row.label
++  let label = row.workspaceId === undefined ? t('group.ungrouped') : row.label
++  const cwd = row.cwd || ''
++  if (cwd.includes('QoderCN') || label.includes('QoderCN')) {
++    label = 'QoderCN'
++  }
++  if (cwd.includes('.gemini/antigravity') || label === 'antigravity') {
++    label = 'Conversation History'
++  }
+   const active = group.expanded && group.containsCurrent
+   const count = t(row.sessionCount === 1 ? 'sessions.count.one' : 'sessions.count.other', { n: row.sessionCount })
+   const [menuOpen, setMenuOpen] = useState(false)
+diff --git a/packages/client/ui-workspace/src/client/tree.ts b/packages/client/ui-workspace/src/client/tree.ts
+index d863125..5ce92d1 100644
+--- a/packages/client/ui-workspace/src/client/tree.ts
++++ b/packages/client/ui-workspace/src/client/tree.ts
+@@ -16,6 +16,8 @@ export const UNGROUPED_LABEL = 'Ungrouped'
+ 
+ /** One top-level session row in a group or the flat list. */
+ export interface SessionNode {
++  /** Session cwd basename（dsh-session-hub 补丁：用于识别回退为目录名的标题）。 */
++  cwdBase?: string
+   id: SessionId
+   /** Stored display title; the renderer substitutes the localized New Session label for blank rows. */
+   title: string
+@@ -105,6 +107,7 @@ function sessionVisible(session: SessionSummary, current: SessionId | undefined,
+   return session.origin !== 'subagent'
+     && !archived.has(session.id)
+     && (!session.blank || session.id === current)
++    && !session.id.startsWith('session-hub-')
+ }
+ 
+ /**
+@@ -170,9 +173,11 @@ function groupByWorkspace(
+ }
+ 
+ function sessionNode(s: SessionSummary): SessionNode {
++  const cwdBase = s.cwd === undefined ? undefined : s.cwd.split(/[\/]/).filter(Boolean).pop()
+   return {
+     id: s.id,
+     title: sessionTitle(s),
++    ...(cwdBase === undefined ? {} : { cwdBase }),
+     blank: s.blank,
+     running: s.running,
+     updatedAt: s.updatedAt,
+@@ -319,20 +324,37 @@ export function deriveSearchResults(
+     if (summary !== undefined && !summary.blank && sessionVisible(summary, list.current, archived)) include(summary)
+   }
+ 
++  const finalItems: SearchResultNode[] = ordered.slice(0, limit).map((summary) => {
++    const match = contentBySession.get(summary.id)
++    return {
++      id: summary.id,
++      title: sessionTitle(summary),
++      workspace: labelOf(summary),
++      running: summary.running,
++      ...(summary.pendingInteraction === undefined
++        ? {}
++        : { pendingInteraction: summary.pendingInteraction }),
++      ...match === undefined ? {} : { snippet: match.snippet },
++    }
++  })
++
++  // 补入外部跨工具搜索结果（若尚未包含在 finalItems 中）
++  for (const item of content.items) {
++    if (finalItems.length >= limit) break
++    if (finalItems.some(x => x.id === item.sessionId)) continue
++    const ext = item as any
++    const srcTag = ext.source ? `[${ext.source.toUpperCase()}] ` : ''
++    finalItems.push({
++      id: item.sessionId,
++      title: `${srcTag}${ext.title || item.sessionId}`,
++      workspace: ext.cwd || (ext.source ? `来自 ${ext.source}` : '外部会话'),
++      running: false,
++      snippet: item.snippet,
++    })
++  }
++
+   return {
+-    items: ordered.slice(0, limit).map((summary) => {
+-      const match = contentBySession.get(summary.id)
+-      return {
+-        id: summary.id,
+-        title: sessionTitle(summary),
+-        workspace: labelOf(summary),
+-        running: summary.running,
+-        ...(summary.pendingInteraction === undefined
+-          ? {}
+-          : { pendingInteraction: summary.pendingInteraction }),
+-        ...match === undefined ? {} : { snippet: match.snippet },
+-      }
+-    }),
++    items: finalItems,
+     hasMore: content.hasMore || ordered.length > limit,
+   }
+ }
