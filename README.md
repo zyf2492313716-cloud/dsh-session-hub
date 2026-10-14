@@ -74,7 +74,12 @@ cd dsh-session-hub
           claudeRoot: /data/claude/projects            # Claude Code 会话目录
           claudeHistory: /data/claude/history.jsonl    # Claude 提示词历史
           antigravityRoot: /data/gemini/antigravity/conversations
+          opencodeWebCwd: /data/opencode/web           # Antigravity 会话归属的 opencode web 工作区
+        knownWebSessionIds:                             # 无法从转录判定归属时，按会话 id 显式指定
+          - 00000000-0000-0000-0000-000000000000
 ```
+
+`knownWebSessionIds` 默认为空：哪些 Antigravity 会话其实属于 opencode web 是各机器的历史事实，插件不内置任何人的会话 id。判定优先走转录嗅探（读工具调用参数里的 `Cwd` 等字段），只有嗅探不到的老会话才需要列进这里。
 
 缺失的数据源会自动跳过（如未安装 Antigravity 则不显示该源），不影响其他源。
 

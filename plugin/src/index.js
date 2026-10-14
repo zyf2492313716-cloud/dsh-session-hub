@@ -37,6 +37,7 @@ const DEFAULT_PATHS = {
   claudeRoot: join(process.env.CLAUDE_CONFIG_DIR || join(HOME, '.claude'), 'projects'),
   claudeHistory: join(process.env.CLAUDE_CONFIG_DIR || join(HOME, '.claude'), 'history.jsonl'),
   dshRoot: join(process.env.DSH_HOME || join(HOME, '.dsh'), 'sessions'),
+  opencodeWebCwd: join(process.env.OPENCODE_WEB_CWD || join(HOME, 'opencode', 'web')),
   antigravityRoot: join(HOME, '.gemini', 'antigravity', 'conversations'),
   antigravityConversations: join(HOME, '.gemini', 'antigravity', 'conversations'),
   antigravityVirtualCwd: join(HOME, '.gemini', 'antigravity'),
@@ -717,29 +718,14 @@ function agOpen(file) {
 
 const _agCwdCache = new Map()
 
-const KNOWN_WEB_SESSIONS = new Set([
-  '00000000-0000-4000-8000-000000000001', // 示例会话1
-  '00000000-0000-4000-8000-000000000002', // 示例会话2
-  '00000000-0000-4000-8000-000000000003', // 示例会话3
-  '00000000-0000-4000-8000-000000000004', // 示例会话4
-  '00000000-0000-4000-8000-000000000005', // 示例会话4
-  '00000000-0000-4000-8000-000000000006', // 示例会话6
-  '00000000-0000-4000-8000-000000000007', // 示例会话7
-  '00000000-0000-4000-8000-000000000008', // 示例会话8
-  '00000000-0000-4000-8000-000000000009', // 示例会话9
-  '00000000-0000-4000-8000-000000000010', // 示例会话10
-  '00000000-0000-4000-8000-000000000011', // 示例会话11
-  '00000000-0000-4000-8000-000000000012', // 示例会话12
-  '00000000-0000-4000-8000-000000000013', // 示例会话13
-  '00000000-0000-4000-8000-000000000014', // 示例会话14
-  '00000000-0000-4000-8000-000000000015', // 示例会话15
-  '00000000-0000-4000-8000-000000000016', // 示例会话16
-  '00000000-0000-4000-8000-000000000017', // 示例会话17
-  '00000000-0000-4000-8000-000000000018', // 示例会话18
-])
+/**
+ * 已知的 opencode-web 会话 id 白名单：各机会话不同，仓库里不内置。
+ * 通过 cordis config 注入 —— config: { knownWebSessionIds: ['<uuid>', ...] }
+ */
+let KNOWN_WEB_SESSIONS = new Set()
 
 function agDetectCwd(id, rawTitle) {
-  if (KNOWN_WEB_SESSIONS.has(id)) return '/Users/example/opencode/web'
+  if (KNOWN_WEB_SESSIONS.has(id)) return PATHS.opencodeWebCwd
   if (rawTitle && rawTitle.includes('请立刻回复：当前时间戳')) return PATHS.antigravityVirtualCwd
   if (_agCwdCache.has(id)) return _agCwdCache.get(id)
   const p = agTranscriptPath(id)
@@ -773,7 +759,7 @@ function agDetectCwd(id, rawTitle) {
         }
         if (isWeb) break
         const content = String(obj.content || '')
-        if (content.includes('/opencode/web') || content.includes('[URI] -> [CorpusName]:\n/Users/example/opencode/web')) {
+        if (content.includes('/opencode/web') || content.includes(`[URI] -> [CorpusName]:\n${PATHS.opencodeWebCwd}`)) {
           isWeb = true
           break
         }
@@ -781,7 +767,7 @@ function agDetectCwd(id, rawTitle) {
     }
   } catch {}
 
-  const finalCwd = isWeb ? '/Users/example/opencode/web' : PATHS.antigravityVirtualCwd
+  const finalCwd = isWeb ? PATHS.opencodeWebCwd : PATHS.antigravityVirtualCwd
   _agCwdCache.set(id, finalCwd)
   return finalCwd
 }
@@ -2496,6 +2482,7 @@ export function apply(ctx, config = {}) {
   // cordis config 层：覆盖数据源路径（通用化：不同用户/部署可自定义各工具数据位置）
   // 示例: config: { paths: { opencodeDb: '/data/opencode.db' } }
   if (config && typeof config.paths === 'object') Object.assign(PATHS, config.paths)
+  if (config && Array.isArray(config.knownWebSessionIds)) KNOWN_WEB_SESSIONS = new Set(config.knownWebSessionIds)
   ctx.inject(['webServer', 'workspaceRegistry', 'sessions'], (webCtx) => {
     const handler = async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')

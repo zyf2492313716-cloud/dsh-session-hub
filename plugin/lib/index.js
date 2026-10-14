@@ -30,6 +30,7 @@ const PATHS = {
 	claudeRoot: join(process.env.CLAUDE_CONFIG_DIR || join(HOME, ".claude"), "projects"),
 	claudeHistory: join(process.env.CLAUDE_CONFIG_DIR || join(HOME, ".claude"), "history.jsonl"),
 	dshRoot: join(process.env.DSH_HOME || join(HOME, ".dsh"), "sessions"),
+	opencodeWebCwd: join(process.env.OPENCODE_WEB_CWD || join(HOME, "opencode", "web")),
 	antigravityRoot: join(HOME, ".gemini", "antigravity", "conversations"),
 	antigravityConversations: join(HOME, ".gemini", "antigravity", "conversations"),
 	antigravityVirtualCwd: join(HOME, ".gemini", "antigravity"),
@@ -744,28 +745,13 @@ function agAllSessionIds() {
 	return Array.from(ids);
 }
 const _agCwdCache = /* @__PURE__ */ new Map();
-const KNOWN_WEB_SESSIONS = new Set([
-	"00000000-0000-4000-8000-000000000001",
-	"00000000-0000-4000-8000-000000000002",
-	"00000000-0000-4000-8000-000000000003",
-	"00000000-0000-4000-8000-000000000004",
-	"00000000-0000-4000-8000-000000000005",
-	"00000000-0000-4000-8000-000000000006",
-	"00000000-0000-4000-8000-000000000007",
-	"00000000-0000-4000-8000-000000000008",
-	"00000000-0000-4000-8000-000000000009",
-	"00000000-0000-4000-8000-000000000010",
-	"00000000-0000-4000-8000-000000000011",
-	"00000000-0000-4000-8000-000000000012",
-	"00000000-0000-4000-8000-000000000013",
-	"00000000-0000-4000-8000-000000000014",
-	"00000000-0000-4000-8000-000000000015",
-	"00000000-0000-4000-8000-000000000016",
-	"00000000-0000-4000-8000-000000000017",
-	"00000000-0000-4000-8000-000000000018"
-]);
+/**
+* 已知的 opencode-web 会话 id 白名单：各机会话不同，仓库里不内置。
+* 通过 cordis config 注入 —— config: { knownWebSessionIds: ['<uuid>', ...] }
+*/
+let KNOWN_WEB_SESSIONS = /* @__PURE__ */ new Set();
 function agDetectCwd(id, rawTitle) {
-	if (KNOWN_WEB_SESSIONS.has(id)) return "/Users/example/opencode/web";
+	if (KNOWN_WEB_SESSIONS.has(id)) return PATHS.opencodeWebCwd;
 	if (rawTitle && rawTitle.includes("请立刻回复：当前时间戳")) return PATHS.antigravityVirtualCwd;
 	if (_agCwdCache.has(id)) return _agCwdCache.get(id);
 	const p = agTranscriptPath(id);
@@ -800,14 +786,14 @@ function agDetectCwd(id, rawTitle) {
 				}
 				if (isWeb) break;
 				const content = String(obj.content || "");
-				if (content.includes("/opencode/web") || content.includes("[URI] -> [CorpusName]:\n/Users/example/opencode/web")) {
+				if (content.includes("/opencode/web") || content.includes(`[URI] -> [CorpusName]:\n${PATHS.opencodeWebCwd}`)) {
 					isWeb = true;
 					break;
 				}
 			} catch {}
 		}
 	} catch {}
-	const finalCwd = isWeb ? "/Users/example/opencode/web" : PATHS.antigravityVirtualCwd;
+	const finalCwd = isWeb ? PATHS.opencodeWebCwd : PATHS.antigravityVirtualCwd;
 	_agCwdCache.set(id, finalCwd);
 	return finalCwd;
 }
@@ -2642,6 +2628,7 @@ function buildImportSeed(session, instruction) {
 }
 function apply(ctx, config = {}) {
 	if (config && typeof config.paths === "object") Object.assign(PATHS, config.paths);
+	if (config && Array.isArray(config.knownWebSessionIds)) KNOWN_WEB_SESSIONS = new Set(config.knownWebSessionIds);
 	ctx.inject([
 		"webServer",
 		"workspaceRegistry",

@@ -478,7 +478,7 @@ index 0000000..bf50944
 +  if (p.includes('/Documents/QoderCN/') || p.includes('/QoderCN/')) {
 +    const m = p.match(/QoderCN\/([^/]+)/)
 +    if (m && m[1]) {
-+      return { name: `QoderCN / ${m[1]}`, fullPath: `/Users/example/Documents/QoderCN/${m[1]}` }
++      return { name: `QoderCN / ${m[1]}`, fullPath: `~/Documents/QoderCN/${m[1]}` }
 +    }
 +    return { name: 'QoderCN Workspace', fullPath: p }
 +  }
@@ -1039,8 +1039,8 @@ index e1e08b9..eb5080f 100644
 +    if (sourceFilter === 'dsh') {
 +      result = groups.filter(g => (g.sessionCount || 0) > 0)
 +    } else if (sourceFilter === 'qodercn') {
-+      const qoderCwd = '/Users/example/Documents/QoderCN'
-+      const qoderCount = (sourceCountsMap['qodercn'] && sourceCountsMap['qodercn'][qoderCwd]) || 114
++      const qoderCwd = '~/Documents/QoderCN'
++      const qoderCount = (sourceCountsMap['qodercn'] && sourceCountsMap['qodercn'][qoderCwd]) || 0
 +      const key = 'qodercn-root'
 +      return [{
 +        key,
@@ -1081,9 +1081,9 @@ index e1e08b9..eb5080f 100644
 +          deduped.push({
 +            ...g,
 +            key: 'qodercn-unified',
-+            cwd: '/Users/example/Documents/QoderCN',
++            cwd: '~/Documents/QoderCN',
 +            label: 'QoderCN',
-+            sessionCount: (sourceCountsMap['qodercn'] && sourceCountsMap['qodercn']['/Users/example/Documents/QoderCN']) || g.sessionCount || 114,
++            sessionCount: (sourceCountsMap['qodercn'] && sourceCountsMap['qodercn']['~/Documents/QoderCN']) || g.sessionCount || 0,
 +            expanded: expandedProjects.includes('qodercn-unified') || g.expanded,
 +          })
 +        }
