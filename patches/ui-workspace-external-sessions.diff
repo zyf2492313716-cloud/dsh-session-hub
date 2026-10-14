@@ -1064,7 +1064,7 @@ index e1e08b9..eb5080f 100644
 +        if (sourceFilter === 'antigravity') {
 +          return cwd.includes('/opencode/web') || cwd.includes('.gemini/antigravity')
 +        }
-+        if (sourceFilter === 'claude') return cwd.includes('claude') || cwd.includes('Desktop') || cwd.includes('exampleuser')
++        if (sourceFilter === 'claude') return cwd.includes('claude')
 +        if (sourceFilter === 'opencode') return !cwd.includes('QoderCN') && !cwd.includes('antigravity')
 +        return true
 +      })
