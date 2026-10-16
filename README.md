@@ -32,15 +32,19 @@
 
 ## 安装
 
-### 方式 A：新版 DSH（支持 `dsh plugin` 命令，推荐）
+### 方式 A：`dsh plugin` 命令（适合 CLI 部署的 web / tui profile）
 
 ```bash
-git clone https://github.com/dsh-external/dsh-session-hub.git
+git clone https://github.com/zyf2492313716-cloud/dsh-session-hub.git
 cd dsh-session-hub
-dsh plugin --profile web add .    # <profile> 换成实际 profile 名（GUI 部署一般是 web）
+dsh plugin --profile web add .    # 换成你的 profile 名
 ```
 
 插件 package.json 已声明 `dsh.bundle`（cordis patch 层），安装后随 profile 自动挂载。重启 `dsh web` 生效。
+
+> **桌面版（DeepSeek Harness.app）不适用方式 A**：`dsh plugin` 会拒绝 `desktop`
+> profile（报 `profile "desktop" is managed exclusively by the Electron
+> application`），因为它由应用独占管理。桌面版请用方式 B。
 
 > 侧边栏混排（外部会话以原生行显示在工作区分组内）依赖 ui-workspace 补丁，见下方「侧边栏补丁」。
 
@@ -55,8 +59,18 @@ cd dsh-session-hub
 安装脚本（幂等，可重复执行）会：
 1. 复制插件到 `$DSH_HOME/plugins/dsh-session-hub/`（保留已有导入缓存）
 2. 创建包别名 `~/node_modules/@dsh-local/dsh-session-hub`
-3. 在 `$DSH_HOME/config.yaml` 追加 cordis 挂载条目（自动备份原文件）
+3. 在 `$DSH_HOME/cordis.patch.yml` 追加挂载条目（自动备份原文件）
 4. 应用 ui-workspace 补丁并构建（侧边栏混排；失败不阻断，API 仍可用）
+
+> **关于 `$DSH_HOME/config.yaml`**：0.1 版用它登记插件，0.2 起不再读取——现在没有
+> 任何代码读这个文件（配置改成了 profile patch 层）。往里写条目不会报错，但
+> **永远不生效**，表现为"装完了插件却不存在"。本脚本从写 `cordis.patch.yml` 起
+> 已修正；如果你之前用旧脚本装过，重新执行一次 `./install.sh` 即可补上正确的条目。
+>
+> 脚本用**绝对路径**注册而不是 `@dsh-local/*` 包名：包名依赖 profile 自己的
+> `node_modules` 能解析到它，而各 profile 的 `node_modules` 是独立的（桌面版就
+> 解析不到 `@dsh-local/dsh-session-hub`）。绝对路径由 loader 直接 import，
+> 不经过包解析，因此在任何 profile 下都能加载。
 
 然后**重启 `dsh web`** 并刷新浏览器页面。
 
@@ -147,7 +161,7 @@ curl http://127.0.0.1:3210/session-hub/api/overview
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Cordis 对应关系**（见 cordis 论文 §4）：`apply` = 效应函数（注册路由/定时器等可回退效应）；`ctx.inject` = 余效应依赖声明（httpServer/workspace/sessions 满足时激活）；config.yaml 的 `- insert:` 条目 = 声明式配置层（id/url/config/disabled 字段，增量协调）；卸载时纤程 dispose 自动恢复上下文。
+**Cordis 对应关系**（见 cordis 论文 §4）：`apply` = 效应函数（注册路由/定时器等可回退效应）；`ctx.inject` = 余效应依赖声明（httpServer/workspace/sessions 满足时激活）；patch 文件里的 `- insert:` 条目 = 声明式配置层（id/url/config/disabled 字段，增量协调）；卸载时纤程 dispose 自动恢复上下文。
 
 ## 常见问题
 
@@ -162,7 +176,7 @@ git apply <本仓库>/patches/ui-workspace-external-sessions.diff || true   # �
 cp <本仓库>/patches/ExternalSessions.tsx packages/client/ui-workspace/src/client/
 pnpm --filter @deepseek-ai/dsh-client-ui-workspace bundle
 ```
-补丁已在 test-zyf2492313716-cloud 最新版源码上验证可应用（上游仅新增 completed 状态字段，不冲突）。
+补丁已在上游最新版源码上验证可应用（上游仅新增 completed 状态字段，不冲突）。
 
 **Q: Antigravity 会话内容为什么是纯文本流？**
 A: Antigravity 用 protobuf 私有格式存储且无官方 schema，插件做字节级文本提取（过滤二进制媒体/格式噪音/重复内容），无法还原角色与工具结构。

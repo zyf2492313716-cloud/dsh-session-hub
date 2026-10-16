@@ -8,22 +8,50 @@ PLUGIN_NAME="dsh-session-hub"
 
 log() { printf '\033[32m[uninstall]\033[0m %s\n' "$*"; }
 
-# ── 1. 移除 config.yaml 挂载条目（先备份）──────────────────────
-if grep -q "id: $PLUGIN_NAME" "$DSH_HOME/config.yaml" 2>/dev/null; then
-  cp "$DSH_HOME/config.yaml" "$DSH_HOME/config.yaml.bak.$(date +%s)"
-  python3 - "$DSH_HOME/config.yaml" "$PLUGIN_NAME" <<'PYEOF'
-import sys, re
+# ── 1. 移除挂载条目（先备份）───────────────────────────────────
+# 条目写在 $DSH_HOME/cordis.patch.yml（home 级 patch 层）。旧版本会写
+# config.yaml，那个文件在 0.2.x 里没有任何读取方，所以两边都要清理：
+# 老用户可能确实留了条目在 config.yaml 里。
+remove_entry() {
+  local file="$1" label="$2"
+  [ -f "$file" ] || return 0
+  grep -q "id: $PLUGIN_NAME" "$file" 2>/dev/null || return 0
+  cp "$file" "$file.bak.$(date +%s)"
+  python3 - "$file" "$PLUGIN_NAME" <<'PYEOF'
+import sys
 path, name = sys.argv[1], sys.argv[2]
-src = open(path).read()
-# 按空行分块，移除包含目标插件 id 的 insert 块
-blocks = re.split(r'\n\s*\n', src)
-kept = [b for b in blocks if not (('- id: ' + name) in b and '- insert:' in b)]
-open(path, 'w').write('\n\n'.join(kept))
+text = open(path).read()
+lines = text.split('\n')
+kept, i = [], 0
+while i < len(lines):
+    line = lines[i]
+    # Drop a whole `- insert:` block whose list contains our id.
+    if line.startswith('- insert:'):
+        j = i + 1
+        while j < len(lines) and (not lines[j].strip() or lines[j].startswith(('    ', '\t'))):
+            j += 1
+        block = '\n'.join(lines[i:j])
+        if f'- id: {name}\n' in block + '\n':
+            i = j
+            continue
+        kept.extend(lines[i:j])
+        i = j
+        continue
+    kept.append(line)
+    i += 1
+text = '\n'.join(kept)
+# A comments-only (or empty) patch file fails boot: dsh requires a top-level
+# YAML array. Collapse to `[]` when no entries remain.
+if not any(ln.lstrip().startswith('- ') for ln in text.split('\n')):
+    head = [ln for ln in text.split('\n') if ln.lstrip().startswith('#')]
+    text = ('\n'.join(head).rstrip('\n') + '\n' if head else '') + '[]\n'
+open(path, 'w').write(text)
 PYEOF
-  log "config.yaml 条目已移除（原文件已备份）"
-else
-  log "config.yaml 无 $PLUGIN_NAME 条目"
-fi
+  log "$label 条目已移除（原文件已备份）"
+}
+
+remove_entry "$DSH_HOME/cordis.patch.yml" "cordis.patch.yml"
+remove_entry "$DSH_HOME/config.yaml" "config.yaml（旧版本遗留）"
 
 # ── 2. 移除包别名 ────────────────────────────────────────────────
 rm -f "$HOME/node_modules/@dsh-local/$PLUGIN_NAME"
