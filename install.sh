@@ -85,7 +85,6 @@ block = (
     f"\n- insert:\n"
     f"    - id: {plugin_id}\n"
     f"      name: '{entry_name}'\n"
-    f"      inject: [webServer, workspaceRegistry, sessions]\n"
 )
 
 # If the file was empty or only comments, start a fresh array.
