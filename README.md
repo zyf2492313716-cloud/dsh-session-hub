@@ -26,21 +26,32 @@
 ## 系统要求
 
 - macOS / Linux
-- DSH 已安装并可运行 `dsh web`（插件挂载于 DSH 的 HTTP 服务）
-- Node.js ≥ 22（需要 `node:sqlite`、`node:zlib` 的 zstd API）
+- DSH `>=0.2.0`（已在 `0.2.1-rc.5` 验证）；Profile：`web`
+- Node.js `>=22.15`（需要 `node:sqlite`、`node:zlib` 的 zstd API）
 - 侧边栏混排（可选）：DSH 源码仓库（`$DSH_HOME/source/current`）+ `pnpm` + `git`
+
+## 权限与边界
+
+| 权限 | 用途 | 范围 |
+|---|---|---|
+| 文件 | 读 + 受控写入 | 浏览/搜索只读 `opencode.db`、`~/.claude/projects`、Antigravity 会话库和 `~/.dsh/sessions`；用户主动使用「导出」时才会写入目标工具目录（Claude Code `~/.claude/projects/*.jsonl` / `~/.claude/history.jsonl`，Antigravity `~/.gemini/antigravity/brain/<id>/`），并更新插件自己的 `state.json` |
+| 网络 | 仅同源 | 浏览器端只访问 DSH 自身的 `/session-hub/api/*`，不连接外网 |
+| 命令 | 无 | 不执行子进程或 Shell |
+| 凭据 | 无 | 不读取 API Key、Cookie、Keychain 或凭据文件 |
+
+浏览和搜索不会修改源工具数据；导出功能会写入上述目标目录，首次导出前请自行备份。插件不修改 DSH 核心或官方包。
 
 ## 安装
 
-### 方式 A：`dsh plugin` 命令（适合 CLI 部署的 web / tui profile）
+### 方式 A：`dsh plugin` 命令（适合 CLI 部署的 web profile）
 
 ```bash
 git clone https://github.com/zyf2492313716-cloud/dsh-session-hub.git
 cd dsh-session-hub
-dsh plugin --profile web add .    # 换成你的 profile 名
+dsh plugin --profile web add ./plugin    # 换成你的 profile 名
 ```
 
-插件 package.json 已声明 `dsh.bundle`（cordis patch 层），安装后随 profile 自动挂载。重启 `dsh web` 生效。
+`plugin/package.json` 已声明 `dsh.bundle`（cordis patch 层），安装后随 profile 自动挂载。重启 `dsh web` 生效。
 
 > **桌面版（DeepSeek Harness.app）不适用方式 A**：`dsh plugin` 会拒绝 `desktop`
 > profile（报 `profile "desktop" is managed exclusively by the Electron
@@ -186,4 +197,4 @@ A: 删除插件目录 `state.json` 中对应条目 + `$DSH_HOME/sessions/` 下�
 
 ## 许可
 
-内部工具，按需使用。源工具数据全程只读，无任何写入风险。
+内部工具，按需使用。浏览/搜索只读源工具数据；导出会在目标工具目录新增对应会话文件，使用前请备份。

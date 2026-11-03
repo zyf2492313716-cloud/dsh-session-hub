@@ -13,6 +13,18 @@
     "lib",
     "dsh-session-hub.cordis.yml"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zyf2492313716-cloud/dsh-session-hub.git",
+    "directory": "plugin"
+  },
+  "engines": {
+    "node": ">=22.15",
+    "dsh": ">=0.2.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "dsh": {
     "bundle": {
       "patch": "dsh-session-hub.cordis.yml"
@@ -24,6 +36,15 @@
         "@deepseek-ai/dsh-client-ui-slots"
       ],
       "platform": "web"
+    },
+    "compatibility": {
+      "dsh": ">=0.2.0",
+      "profiles": [
+        "web"
+      ],
+      "dshReleases": {
+        "0.2.1-rc.5": "compatible"
+      }
     }
   },
   "license": "MIT"
