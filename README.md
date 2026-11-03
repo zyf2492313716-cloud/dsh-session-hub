@@ -195,6 +195,11 @@ A: Antigravity 用 protobuf 私有格式存储且无官方 schema，插件做字
 **Q: 想重新导入某个会话？**
 A: 删除插件目录 `state.json` 中对应条目 + `$DSH_HOME/sessions/` 下对应 `session-hub-*` 会话目录，再点击即重新导入。
 
+## 验证状态
+
+- **已验证**：manifest/Bundle Patch 解析、DSH Store 固定源码预检（本地等价检查）、DSH `0.2.1-rc.5` 一次性 Profile 安装、`/session-hub/api/overview` 与 workspaces/search API 可读。
+- **未验证**：真实 Desktop UI 侧边栏混排、其他 DSH 版本、卸载/回滚。
+
 ## 许可
 
 内部工具，按需使用。浏览/搜索只读源工具数据；导出会在目标工具目录新增对应会话文件，使用前请备份。
