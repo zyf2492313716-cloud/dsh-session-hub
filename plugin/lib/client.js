@@ -10,8 +10,9 @@ window.__ModuleLoader__.load({
 		* dsh-session-hub — client half.
 		*
 		* 在 DSH Web 注册客户端组件：Settings → General 信息行（官方 settings.general.item
-		* 扩展点），展示插件运行状态与跨工具会话概览。数据全部来自 node half 的
-		* /session-hub/api 只读接口。
+		* 扩展点），展示插件运行状态与跨工具会话概览。浏览与搜索走 node half 的
+		* /session-hub/api 只读接口；「同步工作区」「导出」两个按钮走 POST，写入落点见
+		* node half 头部说明。
 		*/
 		const API = "/session-hub/api";
 		const SOURCES = [

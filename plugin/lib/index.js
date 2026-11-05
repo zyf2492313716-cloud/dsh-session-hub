@@ -9,16 +9,25 @@ import { zstdDecompressSync } from "node:zlib";
 /**
 * dsh-session-hub — node half.
 *
-* 跨工具会话可视化中心的数据服务（只读）：
-*   GET /session-hub/api/overview             各源统计
-*   GET /session-hub/api/workspaces           按工作区分组的会话列表（跨源）
-*   GET /session-hub/api/search?q=…           标题 + 正文搜索（无持久索引）
-*   GET /session-hub/api/session?source=&id=  会话完整内容
+* 跨工具会话可视化中心的数据服务：
+*   GET  /session-hub/api/overview             各源统计
+*   GET  /session-hub/api/workspaces           按工作区分组的会话列表（跨源）
+*   GET  /session-hub/api/search?q=…           标题 + 正文搜索（无持久索引）
+*   GET  /session-hub/api/session?source=&id=  会话完整内容
+*   POST /session-hub/api/continue             把外部会话接续成 DSH 会话（写入）
+*   POST /session-hub/api/export               导出到 Claude Code / Antigravity（写入）
 *
-* 数据源（全部只读，零写入）：
+* 数据源（浏览、搜索、概览全部只读，SQLite 以 query_only 打开）：
 *   opencode : ~/.local/share/opencode/opencode.db        (SQLite query_only)
 *   claude   : ~/.claude/projects/ 下的会话 JSONL
+*   antigravity : ~/.gemini/antigravity/{conversations,brain} 会话与 protobuf 摘要
 *   dsh      : ~/.dsh/sessions/ 下的 zstd 会话日志 (多帧)
+*
+* 写入只发生在用户显式点「接续 / 导出」时，落点固定为三处：
+*   ~/.claude/projects/<workspace>/<id>.jsonl 与 ~/.claude/history.jsonl（接续/导出到 Claude）
+*   ~/.gemini/antigravity/brain/<id>/.system_generated/logs/**（导出到 Antigravity）
+*   插件包目录内的 state.json（导入与导出记录，随插件卸载一并清除）
+* 被动浏览与搜索不产生任何写入；不执行外部命令，不读取 API Key、Cookie、Keychain 或凭据文件。
 *
 * 纯 ESM、零运行时依赖；通过 ctx.inject(['webServer', 'workspaceRegistry', 'sessions']) 挂载，
 * 无 httpServer 的表面（如 TUI）也能安全加载。
