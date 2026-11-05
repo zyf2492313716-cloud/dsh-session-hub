@@ -26,7 +26,7 @@
 ## 系统要求
 
 - macOS / Linux
-- DSH `>=0.2.0`（已在 `0.2.1-rc.5` 验证）；Profile：`web`
+- DSH `>=0.2.0`；逐版本兼容记录与取证方式见下面「验证状态」；Profile：`web`
 - Node.js `>=22.15`（需要 `node:sqlite`、`node:zlib` 的 zstd API）
 - 侧边栏混排（可选）：DSH 源码仓库（`$DSH_HOME/source/current`）+ `pnpm` + `git`
 
@@ -197,8 +197,25 @@ A: 删除插件目录 `state.json` 中对应条目 + `$DSH_HOME/sessions/` 下�
 
 ## 验证状态
 
-- **已验证**：manifest/Bundle Patch 解析、DSH Store 固定源码预检（本地等价检查）、DSH `0.2.1-rc.5` 一次性 Profile 安装、`/session-hub/api/overview` 与 workspaces/search API 可读。
-- **未验证**：真实 Desktop UI 侧边栏混排、其他 DSH 版本、卸载/回滚。
+- **已验证**：manifest/Bundle Patch 解析、DSH Store 固定源码预检（`status: passed`，run 41980040464 @ `1469f20`）、DSH `0.2.1-rc.5` 一次性 Profile 安装、`/session-hub/api/overview` 与 workspaces/search API 可读。
+- **未验证**：真实 Desktop UI 侧边栏混排、卸载/回滚。
+
+### `dsh.compatibility.dshReleases` 各行的证据
+
+| 版本 | 证据级别 | 依据 |
+| --- | --- | --- |
+| `0.2.1-rc.5` | 运行验收 | 一次性 Profile 安装通过；本机宿主即 `0.2.1-rc.5`，`GET /session-hub/api/overview` 返回 200 且带五个源的统计 |
+| `0.2.2-alpha.2` | 契约核对 | 见下 |
+| `0.2.2-alpha.3` | 契约核对 | 见下 |
+| `0.2.2-rc.1` | 契约核对 | 见下 |
+
+契约核对的做法：取 `@deepseek-ai/dsh@<版本>` 在 npm 上的固定发布物闭包，逐个解包检查本插件用到的宿主接口是否仍存在——注入服务 `webServer`（`@deepseek-ai/dsh-web-app`、`dsh-tool-cordis`、`dsh-agent-preset`）、`workspaceRegistry`（`dsh-agent-preset`、`dsh-tool-cordis`）、客户端扩展点 `settings.general.item`（`@deepseek-ai/dsh-cordis-client-runner`）与 `window.__ModuleLoader__`。四个版本结果一致：上述 token 全部存在、没有消失或改名，新增的只是额外引用方（`dsh-experimental-liveshare`、`dsh-schedule`、`dsh-session-projection`）。
+
+这一级证据**不**等价于在新版本上做过的安装/启动/卸载验收。之所以没做：`npm i @deepseek-ai/dsh@0.2.2-rc.1` 在匿名 npm 下无法解析——依赖闭包里 `@deepseek-ai/dsh-desktop-host@0.2.1-rc.5`、`@deepseek-ai/cordis`、`@deepseek-ai/cordis-plugin-*`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-official-bundles`、`@deepseek-ai/dsh-personalized-recommendations` 等发布物对公网返回 404。有内部源权限的人可以补这一级证据。
+
+写入面（审核请按 `user-reviewed` 路径核对）：只有 `POST /session-hub/api/continue` 与 `POST /session-hub/api/export` 会写，落点是 `~/.claude/projects/**.jsonl`、`~/.claude/history.jsonl`、`~/.gemini/antigravity/brain/<id>/.system_generated/logs/**` 和插件目录内的 `state.json`；浏览、搜索、概览全程只读，SQLite 以 `query_only` 打开；不执行命令，不读取凭据（`capability-credentials` 命中的是 `process.env.XDG_DATA_HOME` 一类的数据目录覆盖，见 `plugin/lib/index.js` 的 `PATHS`）。
+
+关于仓库里的 `patches/`：`patches/ui-workspace-external-sessions.diff` 与 `patches/ExternalSessions.tsx` 是给想要 Desktop 侧边栏混排的人**手动**应用到 DSH 源码仓库的可选材料，不在 `package.json` 的 `files` 里、不参与安装、运行时代码不引用它。插件本体只通过官方 Bundle 入口和 `/session-hub/api/*` 路由挂载，不修改 DSH 核心、官方包或官方清单。
 
 ## 许可
 
