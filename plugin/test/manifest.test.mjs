@@ -58,3 +58,9 @@ test('the node source contract states the real write paths', async () => {
     assert.ok(src.includes(marker), `header should name the write surface: ${marker}`)
   }
 })
+
+test('client inject omits removed dsh-client-runtime and non-graph packages', () => {
+  const inject = pkg.dsh.client.inject ?? []
+  assert.ok(!inject.includes('@deepseek-ai/dsh-client-runtime'))
+  assert.ok(!inject.includes('@deepseek-ai/dsh-client-ui-slots'))
+})
