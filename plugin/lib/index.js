@@ -2562,6 +2562,7 @@ function buildImportSeed(session, instruction) {
 				surfaceOp: "append",
 				data: {
 					turn: currentTurn,
+					stream: [],
 					step,
 					message: {
 						id: randomUUID(),
@@ -2585,11 +2586,12 @@ function buildImportSeed(session, instruction) {
 					step,
 					message: {
 						id: randomUUID(),
-						role: "user",
+						role: "tool",
 						source: {
 							kind: "tool",
 							callId: c.callId
 						},
+						toolCallId: c.callId,
 						content: [{
 							type: "tool-result",
 							toolCallId: c.callId,
@@ -2638,6 +2640,7 @@ function buildImportSeed(session, instruction) {
 				time: now,
 				data: {
 					turn: currentTurn,
+					stream: [],
 					step
 				}
 			});

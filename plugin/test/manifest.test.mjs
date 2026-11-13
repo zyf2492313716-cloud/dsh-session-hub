@@ -99,7 +99,6 @@ test('the import seed carries the step boundaries and stream the host requires',
   const build = src.slice(src.indexOf('function buildImportSeed'))
   assert.ok(build.includes("type: 'step/start'"), 'seed needs a step/start before each assistant message')
   assert.ok(build.includes("type: 'step/end'"), 'seed needs a step/end after each assistant message')
-  assert.ok(build.includes('stream: []'), 'assistant/message data.stream must be an array')
   // 只数代码里的类型声明，注释里提到这些名字的不算
   const countType = (name) => (build.match(new RegExp(`type: '${name}'`, 'g')) ?? []).length
   const assistantMessages = countType('assistant/message')
@@ -107,7 +106,28 @@ test('the import seed carries the step boundaries and stream the host requires',
   const stepEnds = countType('step/end')
   assert.equal(stepStarts, assistantMessages, 'every assistant message needs a step/start')
   assert.equal(stepEnds, assistantMessages, 'every assistant message needs a step/end')
+
+  // 宿主对 step/start 与 assistant/message 都校验 data.stream 是数组
+  for (const type of ['step/start', 'assistant/message']) {
+    const at = build.indexOf(`type: '${type}'`)
+    const data = build.slice(at, at + 220)
+    assert.ok(data.includes('stream: []'), `${type} data.stream must be an array`)
+  }
 })
+
+/**
+ * 宿主契约：tool/result 的 message.role 必须是 "tool"，且 message.toolCallId
+ * 要与 source.callId 一致——写错会被整份 seed 拒收。
+ */
+test('tool results carry the role and call id the host requires', async () => {
+  const src = await readFile(join(pluginRoot, 'src/index.js'), 'utf8')
+  const build = src.slice(src.indexOf('function buildImportSeed'))
+  const at = build.indexOf("type: 'tool/result'")
+  const block = build.slice(at, at + 700)
+  assert.ok(block.includes("role: 'tool'"), 'tool/result message.role must be "tool"')
+  assert.ok(block.includes('toolCallId: c.callId'), 'tool/result message needs toolCallId matching source.callId')
+})
+
 /** 导入时按需建工作区：启动不登记，用户点了「接续」才登记并归组。 */
 test('importing registers the session workspace on demand so grouping still works', async () => {
   const src = await readFile(join(pluginRoot, 'src/index.js'), 'utf8')

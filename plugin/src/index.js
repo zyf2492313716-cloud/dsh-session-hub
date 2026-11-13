@@ -2445,7 +2445,7 @@ function buildImportSeed(session, instruction) {
         // 且 data.stream 必须是数组（宿主按它还原结算状态），缺一即拒绝导入。
         seed.push({
           type: 'step/start', seq: seq++, time: now,
-          data: { turn: currentTurn, step },
+          data: { turn: currentTurn, step, stream: [] },
         })
         seed.push({
           type: 'assistant/message', seq: seq++, time: now, surfaceOp: 'append',
@@ -2464,8 +2464,11 @@ function buildImportSeed(session, instruction) {
             data: {
               turn: currentTurn, step,
               message: {
-                id: randomUUID(), role: 'user',
+                // 宿主契约：tool/result 的 message.role 必须是 "tool"，
+                // 且 message.toolCallId 要与 source.callId 一致。
+                id: randomUUID(), role: 'tool',
                 source: { kind: 'tool', callId: c.callId },
+                toolCallId: c.callId,
                 content: [{ type: 'tool-result', toolCallId: c.callId, content: [{ type: 'text', text: c.output }], isError: false }],
               },
             },
@@ -2497,7 +2500,7 @@ function buildImportSeed(session, instruction) {
         step++
         seed.push({
           type: 'step/start', seq: seq++, time: now,
-          data: { turn: currentTurn, step },
+          data: { turn: currentTurn, step, stream: [] },
         })
         seed.push({
           type: 'assistant/message', seq: seq++, time: now, surfaceOp: 'append',
