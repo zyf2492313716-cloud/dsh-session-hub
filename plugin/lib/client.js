@@ -15,6 +15,20 @@ window.__ModuleLoader__.load({
 		* node half 头部说明。
 		*/
 		const API = "/session-hub/api";
+		/**
+		* 统一的接口调用：路由现在有 DSH 的访问准入，未认证回 401、越界回 403，
+		* 两者都是纯文本而不是 JSON，这里转成可读的错误信息交给调用方。
+		*/
+		async function api(path, init) {
+			const r = await fetch(`${API}${path}`, init);
+			if (!r.ok) {
+				const text = await r.text().catch(() => "");
+				if (r.status === 401) throw new Error("需要 DSH 会话认证（请从 dsh web 打印的地址打开）");
+				if (r.status === 403) throw new Error("请求被 DSH 的访问准入拒绝");
+				throw new Error(text || `HTTP ${r.status}`);
+			}
+			return await r.json();
+		}
 		const SOURCES = [
 			{
 				id: "all",
@@ -97,12 +111,12 @@ window.__ModuleLoader__.load({
 			const [session, setSession] = (0, react.useState)(null);
 			const [loading, setLoading] = (0, react.useState)(false);
 			(0, react.useEffect)(() => {
-				fetch(`${API}/overview`).then((r) => r.json()).then((d) => setOverview(d.sources ?? [])).catch(() => {});
+				api("/overview").then((d) => setOverview(d.sources ?? [])).catch(() => {});
 				refresh();
 			}, []);
 			const refresh = (0, react.useCallback)((src = source) => {
 				setLoading(true);
-				fetch(`${API}/workspaces?source=${src}`).then((r) => r.json()).then((d) => {
+				api(`/workspaces?source=${src}`).then((d) => {
 					setWorkspaces(d.workspaces ?? []);
 					setLoading(false);
 				}).catch(() => setLoading(false));
@@ -116,7 +130,7 @@ window.__ModuleLoader__.load({
 					return;
 				}
 				setLoading(true);
-				fetch(`${API}/search?q=${encodeURIComponent(q)}&source=${source}`).then((r) => r.json()).then((d) => {
+				api(`/search?q=${encodeURIComponent(q)}&source=${source}`).then((d) => {
 					setResults(d.results ?? []);
 					setLoading(false);
 				}).catch(() => setLoading(false));
@@ -130,7 +144,7 @@ window.__ModuleLoader__.load({
 			const openSession = (s) => {
 				setSelected(s);
 				setLoading(true);
-				fetch(`${API}/session?source=${s.source}&id=${encodeURIComponent(s.id)}`).then((r) => r.json()).then((d) => {
+				api(`/session?source=${s.source}&id=${encodeURIComponent(s.id)}`).then((d) => {
 					setSession(d.session ?? null);
 					setLoading(false);
 				}).catch(() => setLoading(false));
@@ -144,7 +158,7 @@ window.__ModuleLoader__.load({
 			const doSync = () => {
 				setSyncing(true);
 				setSyncMsg("");
-				fetch(`${API}/workspaces/sync`, { method: "POST" }).then((r) => r.json()).then((d) => {
+				api("/workspaces/sync", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }).then((d) => {
 					setSyncMsg(`已同步 ${d.synced?.length ?? 0} 个工作区到 DSH 侧边栏${d.failed?.length ? `，${d.failed.length} 个失败` : ""}`);
 					setSyncing(false);
 					refresh(source);
@@ -193,12 +207,19 @@ window.__ModuleLoader__.load({
 		*/
 		function SessionHubSettingsRow() {
 			const [overview, setOverview] = (0, react.useState)(null);
+			const [error, setError] = (0, react.useState)("");
 			(0, react.useEffect)(() => {
 				let alive = true;
-				fetch(`${API}/overview`).then((r) => r.json()).then((d) => {
-					if (alive) setOverview(d.sources ?? []);
-				}).catch(() => {
-					if (alive) setOverview([]);
+				api("/overview").then((d) => {
+					if (alive) {
+						setOverview(d.sources ?? []);
+						setError("");
+					}
+				}).catch((e) => {
+					if (alive) {
+						setOverview([]);
+						setError(e?.message ?? String(e));
+					}
 				});
 				return () => {
 					alive = false;
@@ -221,7 +242,7 @@ window.__ModuleLoader__.load({
 				fontSize: 12,
 				opacity: .6,
 				marginTop: 2
-			} }, overview === null ? "状态检查中…" : `已连接 · 共 ${total} 个外部会话（${(overview ?? []).map((s) => `${s.source} ${s.sessions}`).join(" / ")}）`)));
+			} }, error ? `未连接 · ${error}` : overview === null ? "状态检查中…" : `已连接 · 共 ${total} 个外部会话（${(overview ?? []).map((s) => `${s.source} ${s.sessions}`).join(" / ")}）`)));
 		}
 		const inject = ["slots"];
 		/**

@@ -41,6 +41,10 @@
 
 浏览和搜索不会修改源工具数据；导出功能会写入上述目标目录，首次导出前请自行备份。插件不修改 DSH 核心或官方包。
 
+### 访问准入
+
+`/session-hub/api/*` 与官方 `/api` 网关走同一套准入：先过 DSH Connection 的 Host/Origin 围栏和浏览器会话认证，未认证返回 `401 unauthorized`、越界返回 `403 forbidden`；`POST` 还要求 `Content-Type: application/json`，否则 `415`。命令行走这些接口需要带上 DSH 浏览器会话的 cookie（或用 `dsh web` 启动时打印的 token 换一张），因此直接 `curl` 不带凭据会拿到 401。
+
 ## 安装
 
 ### 方式 A：`dsh plugin` 命令（适合 CLI 部署的 web profile）
@@ -143,28 +147,32 @@ curl http://127.0.0.1:3210/session-hub/api/overview
 
 ## HTTP API
 
-所有端点挂载于 DSH Web 服务的 `/session-hub/api/` 前缀，**全部只读**（除 `/continue` 创建导入会话）：
+所有端点挂载于 DSH Web 服务的 `/session-hub/api/` 前缀，走 DSH 自身的访问准入（未认证 401 / 越界 403，POST 需 `application/json`）。**除 `/continue` 与 `/export` 创建或写入外全部只读**：
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
 | `/overview` | GET | 各源会话统计 |
-| `/workspaces?source=` | GET | 按工作区分组的会话列表（含 `imported` 标记） |
+| `/workspaces?source=` | GET | 按工作区分组的会话列表（含 `inDsh` 标记） |
 | `/sessions?cwd=&source=` | GET | 指定目录的会话列表 |
 | `/session?source=&id=` | GET | 单个会话完整内容 |
 | `/search?q=&source=` | GET | 跨源搜索 |
+| `/workspaces/sync` | POST | 把外部工作区目录登记为 DSH 工作区（用户显式点击「⇄ 同步工作区到 DSH 侧边栏」时触发） |
 | `/continue` | POST | 导入为 DSH 原生会话（幂等）`{"source":"opencode","id":"ses_..."}` |
+| `/export` | POST | 导出到目标工具目录 `{"sessionId":"...","target":"claude"}` |
 
 ## 架构
 
 ```
 ┌─ node half (lib/index.js) ──── cordis 组件: apply(ctx) ─┐
-│  ctx.inject(['httpServer','workspace','sessions'])      │
+│  ctx.inject(['webServer','workspaceRegistry','sessions', │
+│              'connection'])                             │
 │  ├─ HTTP 路由: /session-hub/api/*（只读源适配器）        │
+│  │    入口先过 connection.requestRejection(req)          │
 │  ├─ buildImportSeed: 外部消息 → DSH SessionEvent        │
 │  │   (turn/start → user/assistant message + tool-call   │
 │  │    → tool/result → session/title → turn/end)         │
 │  ├─ 导入幂等缓存 state.json                              │
-│  └─ 启动迁移: 归组补挂接 + 虚拟工作区注册                 │
+│  └─ 启动迁移: 归组补挂接（不注册新工作区）               │
 └─────────────────────────────────────────────────────────┘
 ┌─ ui-workspace 补丁 (patches/) ─────────────────────────┐
 │  ExternalSessions.tsx: 外部会话以原生 sessionRow 样式     │
@@ -213,7 +221,11 @@ A: 删除插件目录 `state.json` 中对应条目 + `$DSH_HOME/sessions/` 下�
 
 这一级证据**不**等价于在新版本上做过的安装/启动/卸载验收。之所以没做：`npm i @deepseek-ai/dsh@0.2.2-rc.1` 在匿名 npm 下无法解析——依赖闭包里 `@deepseek-ai/dsh-desktop-host@0.2.1-rc.5`、`@deepseek-ai/cordis`、`@deepseek-ai/cordis-plugin-*`、`@deepseek-ai/schemastery`、`@deepseek-ai/dsh-official-bundles`、`@deepseek-ai/dsh-personalized-recommendations` 等发布物对公网返回 404。有内部源权限的人可以补这一级证据。
 
-写入面（审核请按 `user-reviewed` 路径核对）：只有 `POST /session-hub/api/continue` 与 `POST /session-hub/api/export` 会写，落点是 `~/.claude/projects/**.jsonl`、`~/.claude/history.jsonl`、`~/.gemini/antigravity/brain/<id>/.system_generated/logs/**` 和插件目录内的 `state.json`；浏览、搜索、概览全程只读，SQLite 以 `query_only` 打开；不执行命令，不读取凭据（`capability-credentials` 命中的是 `process.env.XDG_DATA_HOME` 一类的数据目录覆盖，见 `plugin/lib/index.js` 的 `PATHS`）。
+写入面（审核请按 `user-reviewed` 路径核对）：`POST /session-hub/api/continue` 与 `POST /session-hub/api/export` 会写，落点是 `~/.claude/projects/**.jsonl`、`~/.claude/history.jsonl`、`~/.gemini/antigravity/brain/<id>/.system_generated/logs/**` 和插件目录内的 `state.json`；浏览、搜索、概览全程只读，SQLite 以 `query_only` 打开；不执行命令，不读取凭据（`capability-credentials` 命中的是 `process.env.XDG_DATA_HOME` 一类的数据目录覆盖，见 `plugin/lib/index.js` 的 `PATHS`）。
+
+工作区列表的改动同样只在用户显式操作时发生：启动只做「归组补挂接」（把已导入会话挂回**已有**工作区，不新建工作区）；把外部工作区目录登记进 DSH 由 `POST /session-hub/api/workspaces/sync` 触发，也就是客户端里「⇄ 同步工作区到 DSH 侧边栏」按钮。导入（`/continue`）会把该会话的工作目录登记为 DSH 工作区并归组——这发生在用户点了「接续」之后。
+
+所有 `/session-hub/api/*` 端点都在 handler 入口先调 `connection.requestRejection(req)`，与官方 `/api` 网关同一套准入：Host/Origin 围栏 + 浏览器会话认证，未认证 401、越界 403；`POST` 另要求 `Content-Type: application/json`（否则 415），body 不是合法 JSON 对象则 400。
 
 关于仓库里的 `patches/`：`patches/ui-workspace-external-sessions.diff` 与 `patches/ExternalSessions.tsx` 是给想要 Desktop 侧边栏混排的人**手动**应用到 DSH 源码仓库的可选材料，不在 `package.json` 的 `files` 里、不参与安装、运行时代码不引用它。插件本体只通过官方 Bundle 入口和 `/session-hub/api/*` 路由挂载，不修改 DSH 核心、官方包或官方清单。
 

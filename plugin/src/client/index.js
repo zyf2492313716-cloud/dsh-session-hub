@@ -17,6 +17,21 @@ const SOURCES = [
   { id: 'qodercn', label: 'QoderCN' },
 ]
 
+/**
+ * 统一的接口调用：路由现在有 DSH 的访问准入，未认证回 401、越界回 403，
+ * 两者都是纯文本而不是 JSON，这里转成可读的错误信息交给调用方。
+ */
+async function api(path, init) {
+  const r = await fetch(`${API}${path}`, init)
+  if (!r.ok) {
+    const text = await r.text().catch(() => '')
+    if (r.status === 401) throw new Error('需要 DSH 会话认证（请从 dsh web 打印的地址打开）')
+    if (r.status === 403) throw new Error('请求被 DSH 的访问准入拒绝')
+    throw new Error(text || `HTTP ${r.status}`)
+  }
+  return await r.json()
+}
+
 const STYLE = `
 .session-hub{display:flex;flex-direction:column;height:100%;min-height:0;padding:0 20px 20px;gap:12px;font-size:13px}
 .session-hub .sh-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 0;border-bottom:1px solid var(--dsh-border,#2c3140)}
@@ -118,13 +133,13 @@ export function SessionHub() {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    fetch(`${API}/overview`).then((r) => r.json()).then((d) => setOverview(d.sources ?? [])).catch(() => {})
+    api('/overview').then((d) => setOverview(d.sources ?? [])).catch(() => {})
     refresh()
   }, [])
 
   const refresh = useCallback((src = source) => {
     setLoading(true)
-    fetch(`${API}/workspaces?source=${src}`).then((r) => r.json()).then((d) => {
+    api(`/workspaces?source=${src}`).then((d) => {
       setWorkspaces(d.workspaces ?? [])
       setLoading(false)
     }).catch(() => setLoading(false))
@@ -135,7 +150,7 @@ export function SessionHub() {
   const runSearch = useCallback((q) => {
     if (!q || !q.trim()) { setResults(null); return }
     setLoading(true)
-    fetch(`${API}/search?q=${encodeURIComponent(q)}&source=${source}`).then((r) => r.json()).then((d) => {
+    api(`/search?q=${encodeURIComponent(q)}&source=${source}`).then((d) => {
       setResults(d.results ?? [])
       setLoading(false)
     }).catch(() => setLoading(false))
@@ -151,7 +166,7 @@ export function SessionHub() {
   const openSession = (s) => {
     setSelected(s)
     setLoading(true)
-    fetch(`${API}/session?source=${s.source}&id=${encodeURIComponent(s.id)}`).then((r) => r.json()).then((d) => {
+    api(`/session?source=${s.source}&id=${encodeURIComponent(s.id)}`).then((d) => {
       setSession(d.session ?? null)
       setLoading(false)
     }).catch(() => setLoading(false))
@@ -164,7 +179,8 @@ export function SessionHub() {
   const doSync = () => {
     setSyncing(true)
     setSyncMsg('')
-    fetch(`${API}/workspaces/sync`, { method: 'POST' }).then((r) => r.json()).then((d) => {
+    // POST 一律 application/json：与官方 /api 网关同款，服务端会拒非 JSON 内容类型
+    api('/workspaces/sync', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((d) => {
       setSyncMsg(`已同步 ${d.synced?.length ?? 0} 个工作区到 DSH 侧边栏${d.failed?.length ? `，${d.failed.length} 个失败` : ''}`)
       setSyncing(false)
       refresh(source)
@@ -213,12 +229,12 @@ export function SessionHub() {
  */
 function SessionHubSettingsRow() {
   const [overview, setOverview] = useState(null)
+  const [error, setError] = useState('')
   useEffect(() => {
     let alive = true
-    fetch(`${API}/overview`)
-      .then((r) => r.json())
-      .then((d) => { if (alive) setOverview(d.sources ?? []) })
-      .catch(() => { if (alive) setOverview([]) })
+    api('/overview')
+      .then((d) => { if (alive) { setOverview(d.sources ?? []); setError('') } })
+      .catch((e) => { if (alive) { setOverview([]); setError(e?.message ?? String(e)) } })
     return () => { alive = false }
   }, [])
   const total = (overview ?? []).reduce((n, s) => n + (s.sessions ?? 0), 0)
@@ -226,9 +242,11 @@ function SessionHubSettingsRow() {
     h('div', { style: { flex: 1, minWidth: 0 } },
       h('div', { style: { fontWeight: 600, fontSize: 14 } }, '会话库 · dsh-session-hub'),
       h('div', { style: { fontSize: 12, opacity: 0.6, marginTop: 2 } },
-        overview === null
-          ? '状态检查中…'
-          : `已连接 · 共 ${total} 个外部会话（${(overview ?? []).map((s) => `${s.source} ${s.sessions}`).join(' / ')}）`,
+        error
+          ? `未连接 · ${error}`
+          : overview === null
+            ? '状态检查中…'
+            : `已连接 · 共 ${total} 个外部会话（${(overview ?? []).map((s) => `${s.source} ${s.sessions}`).join(' / ')}）`,
       ),
     ),
   )

@@ -23,14 +23,20 @@ import { zstdDecompressSync } from "node:zlib";
 *   antigravity : ~/.gemini/antigravity/{conversations,brain} 会话与 protobuf 摘要
 *   dsh      : ~/.dsh/sessions/ 下的 zstd 会话日志 (多帧)
 *
+* 准入：/session-hub/api/* 一律先过 DSH 自身的连接准入（Host/Origin 围栏 + 已认证
+* 的浏览器会话），与官方 /api 网关同一套判定：未认证 401，越界 Host/Origin 403；
+* POST 另要求 Content-Type: application/json，否则 415。
+*
 * 写入只发生在用户显式点「接续 / 导出」时，落点固定为三处：
 *   ~/.claude/projects/<workspace>/<id>.jsonl 与 ~/.claude/history.jsonl（接续/导出到 Claude）
 *   ~/.gemini/antigravity/brain/<id>/.system_generated/logs/**（导出到 Antigravity）
 *   插件包目录内的 state.json（导入与导出记录，随插件卸载一并清除）
+* 接续时另会把该会话的工作目录登记进 DSH 工作区列表并归组（DSH 内部状态，同样
+* 只发生在用户显式接续时）；启动不再批量登记其他助手历史里的工作区。
 * 被动浏览与搜索不产生任何写入；不执行外部命令，不读取 API Key、Cookie、Keychain 或凭据文件。
 *
-* 纯 ESM、零运行时依赖；通过 ctx.inject(['webServer', 'workspaceRegistry', 'sessions']) 挂载，
-* 无 httpServer 的表面（如 TUI）也能安全加载。
+* 纯 ESM、零运行时依赖；通过 ctx.inject(['webServer', 'workspaceRegistry', 'sessions',
+* 'connection']) 挂载，无 httpServer 的表面（如 TUI）也能安全加载。
 */
 const HOME = homedir();
 /** 运行时生效路径（apply 时按 config.paths 覆盖）。 */
@@ -388,15 +394,6 @@ function claudeParse(file, withMessages) {
 		timeUpdated: Math.round(st.mtimeMs),
 		messages
 	};
-}
-/** 启动时注册 Claude 会话涉及的工作区（幂等），让侧边栏出现对应分组。 */
-function registerClaudeWorkspaces(workspaceSvc) {
-	const cwds = /* @__PURE__ */ new Set();
-	for (const f of claudeSessionFiles()) try {
-		const m = claudeParse(f, false);
-		if (m && m.cwd) cwds.add(m.cwd);
-	} catch {}
-	for (const cwd of cwds) workspaceSvc.create(cwd).catch(() => {});
 }
 function extractClaudeText(msg) {
 	const content = Array.isArray(msg.content) ? msg.content : typeof msg.content === "string" ? [{
@@ -1917,6 +1914,23 @@ async function syncWorkspaces(workspaceSvc) {
 		failed
 	};
 }
+/**
+ * 读取 POST 的 JSON 请求体。空体或非法 JSON 一律回 400（官方 /api 网关同款），
+ * 避免把畸形 body 当成空对象继续处理。
+ */
+async function readJsonBody(req, res) {
+	let raw = "";
+	for await (const chunk of req) raw += chunk;
+	try {
+		const parsed = JSON.parse(raw);
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+		return parsed;
+	} catch {
+		res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+		res.end("body is not JSON");
+		return null;
+	}
+}
 /** 工具调用转换上限：支持完整工具执行轨迹导入。 */
 const MAX_IMPORT_TOOL_CALLS = 5e3;
 /** 工具入参/输出的导入截断（比会话读取截断更短，控制模型上下文 token）。 */
@@ -2368,7 +2382,14 @@ async function attachImportedToWorkspace(workspaceSvc, session) {
 		}
 		cwd = canonPath(cwd);
 		if (!cwd) return;
-		const ws = workspaceSvc.list().find((w) => canonPath(w.path) === cwd);
+		let ws = workspaceSvc.list().find((w) => canonPath(w.path) === cwd);
+		// 启动不再批量登记外部工作区，这里按需补建：用户点了「接续」才把该会话
+		// 的目录登记为 DSH 工作区，随后挂接归组（写入只发生在显式操作时）。
+		if (!ws && typeof workspaceSvc.create === "function") try {
+			ws = await workspaceSvc.create(cwd);
+		} catch {
+			ws = void 0;
+		}
 		if (ws && typeof ws.attachSession === "function") await ws.attachSession(session.id);
 		else console.warn("[session-hub] attach 跳过: 无匹配工作区 cwd=" + cwd + " 现有=" + workspaceSvc.list().map((w) => w.path).join(","));
 	} catch (err) {
@@ -2525,6 +2546,16 @@ function buildImportSeed(session, instruction) {
 			if (!content.length) continue;
 			step++;
 			seed.push({
+				type: "step/start",
+				seq: seq++,
+				time: now,
+				data: {
+					turn: currentTurn,
+					stream: [],
+					step
+				}
+			});
+			seed.push({
 				type: "assistant/message",
 				seq: seq++,
 				time: now,
@@ -2571,6 +2602,15 @@ function buildImportSeed(session, instruction) {
 					}
 				}
 			});
+			seed.push({
+				type: "step/end",
+				seq: seq++,
+				time: now,
+				data: {
+					turn: currentTurn,
+					step
+				}
+			});
 		} else {
 			const content = [];
 			const textBuf = [];
@@ -2593,6 +2633,15 @@ function buildImportSeed(session, instruction) {
 			if (!content.length) continue;
 			step++;
 			seed.push({
+				type: "step/start",
+				seq: seq++,
+				time: now,
+				data: {
+					turn: currentTurn,
+					step
+				}
+			});
+			seed.push({
 				type: "assistant/message",
 				seq: seq++,
 				time: now,
@@ -2600,6 +2649,7 @@ function buildImportSeed(session, instruction) {
 				data: {
 					turn: currentTurn,
 					step,
+					stream: [],
 					message: {
 						id: randomUUID(),
 						role: "assistant",
@@ -2610,6 +2660,15 @@ function buildImportSeed(session, instruction) {
 							model: prov.modelID ?? "unknown"
 						}
 					}
+				}
+			});
+			seed.push({
+				type: "step/end",
+				seq: seq++,
+				time: now,
+				data: {
+					turn: currentTurn,
+					step
 				}
 			});
 		}
@@ -2641,12 +2700,31 @@ function apply(ctx, config = {}) {
 	ctx.inject([
 		"webServer",
 		"workspaceRegistry",
-		"sessions"
+		"sessions",
+		"connection"
 	], (webCtx) => {
 		const handler = async (req, res) => {
+			// 与官方 /api 网关同一套准入：先过 Connection 的 Host/Origin 围栏与
+			// 浏览器会话认证（未认证一律 401，越界 Host/Origin 一律 403）。
+			const rejection = webCtx.connection.requestRejection(req);
+			if (rejection !== void 0) {
+				res.writeHead(rejection, { "content-type": "text/plain; charset=utf-8" });
+				res.end(rejection === 401 ? "unauthorized" : "forbidden");
+				return;
+			}
 			const url = new URL(req.url ?? "/", "http://localhost");
 			const p = url.pathname;
 			const q = url.searchParams;
+			// POST 必须是 application/json：与官方 /api 网关同款，避免跨源表单提交
+			// （text/plain 等简单内容类型）被浏览器当成可读的跨站请求。
+			if (req.method === "POST") {
+				const ct = String(req.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+				if (ct !== "application/json") {
+					res.writeHead(415, { "content-type": "text/plain; charset=utf-8" });
+					res.end("content type must be application/json");
+					return;
+				}
+			}
 			try {
 				if (p === "/session-hub/api/overview" && req.method === "GET") return sendJson(res, 200, {
 					ok: true,
@@ -2714,12 +2792,8 @@ function apply(ctx, config = {}) {
 					});
 				}
 				if (p === "/session-hub/api/continue" && req.method === "POST") {
-					let body = "";
-					for await (const chunk of req) body += chunk;
-					let input = {};
-					try {
-						input = JSON.parse(body || "{}");
-					} catch {}
+					const input = await readJsonBody(req, res);
+					if (input === null) return;
 					if (input.source === "dsh") return sendJson(res, 200, {
 						ok: true,
 						sessionId: input.id,
@@ -2800,12 +2874,8 @@ function apply(ctx, config = {}) {
 					});
 				}
 				if (p === "/session-hub/api/export" && req.method === "POST") {
-					let body = "";
-					for await (const chunk of req) body += chunk;
-					let input = {};
-					try {
-						input = JSON.parse(body || "{}");
-					} catch {}
+					const input = await readJsonBody(req, res);
+					if (input === null) return;
 					if (!input.sessionId) return sendJson(res, 400, {
 						ok: false,
 						error: "缺少 sessionId 参数"
@@ -2846,9 +2916,6 @@ function apply(ctx, config = {}) {
 			handler
 		});
 		setTimeout(() => {
-			webCtx.workspaceRegistry.create(PATHS.antigravityVirtualCwd).catch(() => {});
-			registerClaudeWorkspaces(webCtx.workspaceRegistry);
-			syncWorkspaces(webCtx.workspaceRegistry).catch(() => {});
 			migrateImportedGrouping(webCtx.workspaceRegistry, webCtx.sessions);
 		}, 2e3).unref?.();
 		return off;

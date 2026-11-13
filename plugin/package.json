@@ -1,8 +1,8 @@
 {
   "name": "@dsh-local/dsh-session-hub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "跨工具会话可视化中心：在 DSH Web 浏览/搜索/查看 opencode、Claude Code、Antigravity 与 DSH 会话（浏览搜索只读、无持久索引；导出与接续仅在用户显式操作时写目标工具目录）",
+  "description": "跨工具会话可视化中心：在 DSH Web 浏览/搜索/查看 opencode、Claude Code、Antigravity 与 DSH 会话（浏览搜索只读、无持久索引；导出与接续仅在用户显式操作时写目标工具目录；路由走 DSH 自身的访问准入）",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",

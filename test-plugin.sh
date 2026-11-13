@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 # dsh-session-hub 功能测试（需要 dsh web 正在运行）
 # 用法: ./test-plugin.sh [port]
-# 覆盖: 服务可达 / overview / workspaces / sessions / search / 导入往返(含幂等+清理)
+# 覆盖: 服务可达 / 访问准入 / overview / workspaces / sessions / search / 导入往返(含幂等+清理)
+#
+# /session-hub/api/* 走 DSH 自身的访问准入（与官方 /api 网关同款），无凭据一律 401。
+# 凭据来源（任选其一）：
+#   1) 环境变量 DSH_TOKEN —— dsh web 启动时打印的 URL 里的 ?token=... 值；
+#   2) 环境变量 DSH_COOKIE —— 已登录浏览器里的 dsh-auth-* cookie 串；
+#   3) 都不给 —— 脚本仍会跑，但只验证「无凭据被拒」这一条，其余用例记为跳过。
 set -uo pipefail
 
 PORT="${1:-${DSH_PORT:-3210}}"
 BASE="http://127.0.0.1:$PORT/session-hub/api"
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PASS=0; FAIL=0
+COOKIE_JAR="$(mktemp -t dsh-session-hub-cookies)"
+trap 'rm -f "$COOKIE_JAR"' EXIT
+
+# 用启动 token 换一张浏览器会话 cookie（/authorizeIndex 签发 dsh-auth-*）
+if [ -n "${DSH_TOKEN:-}" ]; then
+  curl -s -c "$COOKIE_JAR" -o /dev/null --max-time 10 "http://127.0.0.1:$PORT/?token=$DSH_TOKEN" || true
+fi
+if [ -n "${DSH_COOKIE:-}" ]; then
+  printf '# Netscape HTTP Cookie File\n127.0.0.1\tFALSE\t/\tFALSE\t0\tdsh-auth\t%s\n' "$DSH_COOKIE" > "$COOKIE_JAR"
+fi
+# 有没有拿到凭据：拿不到就只能测拒绝路径
+AUTHED=0
+if [ -s "$COOKIE_JAR" ]; then AUTHED=1; fi
 
 check() { # $1=描述 $2=退出码
   if [ "$2" -eq 0 ]; then echo "  ✅ $1"; PASS=$((PASS+1)); else echo "  ❌ $1"; FAIL=$((FAIL+1)); fi
@@ -15,23 +34,29 @@ check() { # $1=描述 $2=退出码
 
 echo "== dsh-session-hub 功能测试 ($BASE) =="
 
-# 1. DSH web 可达
+# 1. DSH web 可达，且访问准入生效（无凭据 → 401，带凭据 → 200）
 code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:$PORT/")
 [ "$code" = "200" ]; check "DSH web 可达 (HTTP $code)" $?
+if [ "$AUTHED" = "1" ]; then
+  unauth=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$BASE/overview")
+  [ "$unauth" = "401" ]; check "无凭据访问被拒 (HTTP $unauth)" $?
+else
+  echo "  ⚠️ 未提供 DSH_TOKEN / DSH_COOKIE，除准入外其余用例跳过"
+fi
 
 # 2. overview：各源统计
-ov=$(curl -s --max-time 60 "$BASE/overview")
+ov=$(curl -s -b "$COOKIE_JAR" --max-time 60 "$BASE/overview")
 echo "$ov" | grep -q '"ok":true'; check "overview API 正常" $?
 for s in opencode claude antigravity dsh; do
   echo "$ov" | grep -q "\"source\":\"$s\""; check "数据源: $s" $?
 done
 
 # 3. workspaces：跨源工作区分组
-ws=$(curl -s --max-time 90 "$BASE/workspaces")
+ws=$(curl -s -b "$COOKIE_JAR" --max-time 90 "$BASE/workspaces")
 echo "$ws" | grep -q '"ok":true'; check "workspaces API 正常" $?
 
 # 4. search：全文搜索
-se=$(curl -s --max-time 90 "$BASE/search?q=test")
+se=$(curl -s -b "$COOKIE_JAR" --max-time 90 "$BASE/search?q=test")
 echo "$se" | grep -q '"ok":true'; check "search API 正常" $?
 
 # 5. sessions：按目录列出（取第一个有外部会话的工作区）
@@ -43,7 +68,7 @@ for w in d.get('workspaces',[]):
         print(w['name']); break
 ")
 if [ -n "$cwd" ]; then
-  sl=$(curl -s --max-time 90 "$BASE/sessions?cwd=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$cwd")")
+  sl=$(curl -s -b "$COOKIE_JAR" --max-time 90 "$BASE/sessions?cwd=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$cwd")")
   echo "$sl" | grep -q '"ok":true'; check "sessions API (cwd=$cwd)" $?
 else
   echo "  ⚠️ 无可用工作区，跳过 sessions 测试"
@@ -51,9 +76,25 @@ fi
 
 # 6. 导入往返测试：选一个未导入的 opencode 会话 → continue → 幂等 → 清理
 echo "-- 导入往返测试（会自动清理测试产生的会话）--"
-python3 - "$BASE" "$DSH_HOME" <<'PYEOF'
+python3 - "$BASE" "$DSH_HOME" "$COOKIE_JAR" <<'PYEOF'
 import json, sys, urllib.request, urllib.parse, os, shutil
-base, dsh_home = sys.argv[1], sys.argv[2]
+base, dsh_home, jar = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def cookie_header(path):
+    # 从 curl 的 cookie jar 里取出 dsh-auth-* 拼成 Cookie 头
+    jar_path = os.path.expanduser(jar)
+    if not os.path.exists(jar_path):
+        return ''
+    for line in open(jar_path):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 7 and parts[5] == 'dsh-auth':
+            return f'{parts[5]}={parts[6]}'
+    return ''
+
+COOKIE = cookie_header(base)
 
 def api(path, data=None):
     req = urllib.request.Request(base + path)
@@ -61,6 +102,8 @@ def api(path, data=None):
     if data is not None:
         req.add_header('content-type', 'application/json')
         body = json.dumps(data).encode()
+    if COOKIE:
+        req.add_header('cookie', COOKIE)
     with urllib.request.urlopen(req, body, timeout=90) as r:
         return json.loads(r.read())
 
@@ -127,11 +170,25 @@ PYEOF
 check "导入往返测试" $?
 
 # 11. 双向导出与跨 Agent 共享测试
-python3 << 'PYEOF'
+python3 - "$PORT" "$COOKIE_JAR" << 'PYEOF'
 import urllib.request, urllib.parse, json, sys, os, sqlite3, glob, shutil
 
-port = sys.argv[1] if len(sys.argv) > 1 else '3210'
+port, jar = sys.argv[1], sys.argv[2]
 base = f'http://127.0.0.1:{port}/session-hub/api'
+
+def cookie_header():
+    if not os.path.exists(jar):
+        return ''
+    for line in open(jar):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 7 and parts[5] == 'dsh-auth':
+            return f'{parts[5]}={parts[6]}'
+    return ''
+
+COOKIE = cookie_header()
 
 def api(path, data=None):
     url = f"{base}{path}"
@@ -141,6 +198,8 @@ def api(path, data=None):
         body = json.dumps(data).encode('utf-8')
     else:
         body = None
+    if COOKIE:
+        req.add_header('cookie', COOKIE)
     try:
         with urllib.request.urlopen(req, data=body, timeout=5) as r:
             return json.loads(r.read().decode('utf-8'))

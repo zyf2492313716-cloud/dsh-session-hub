@@ -15,14 +15,20 @@
  *   antigravity : ~/.gemini/antigravity/{conversations,brain} 会话与 protobuf 摘要
  *   dsh      : ~/.dsh/sessions/ 下的 zstd 会话日志 (多帧)
  *
+ * 准入：/session-hub/api/* 一律先过 DSH 自身的连接准入（Host/Origin 围栏 + 已认证
+ * 的浏览器会话），与官方 /api 网关同一套判定：未认证 401，越界 Host/Origin 403；
+ * POST 另要求 Content-Type: application/json，否则 415。
+ *
  * 写入只发生在用户显式点「接续 / 导出」时，落点固定为三处：
  *   ~/.claude/projects/<workspace>/<id>.jsonl 与 ~/.claude/history.jsonl（接续/导出到 Claude）
  *   ~/.gemini/antigravity/brain/<id>/.system_generated/logs/**（导出到 Antigravity）
  *   插件包目录内的 state.json（导入与导出记录，随插件卸载一并清除）
+ * 接续时另会把该会话的工作目录登记进 DSH 工作区列表并归组（DSH 内部状态，同样
+ * 只发生在用户显式接续时）；启动不再批量登记其他助手历史里的工作区。
  * 被动浏览与搜索不产生任何写入；不执行外部命令，不读取 API Key、Cookie、Keychain 或凭据文件。
  *
- * 纯 ESM、零运行时依赖；通过 ctx.inject(['webServer', 'workspaceRegistry', 'sessions']) 挂载，
- * 无 httpServer 的表面（如 TUI）也能安全加载。
+ * 纯 ESM、零运行时依赖；通过 ctx.inject(['webServer', 'workspaceRegistry', 'sessions',
+ * 'connection']) 挂载，无 httpServer 的表面（如 TUI）也能安全加载。
  */
 import { readFileSync, readdirSync, statSync, writeFileSync, renameSync, realpathSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -334,20 +340,6 @@ function claudeParse(file, withMessages) {
     cwd, agent: 'claude', model: undefined, cost: 0,
     timeCreated: Math.round(st.birthtimeMs), timeUpdated: Math.round(st.mtimeMs),
     messages,
-  }
-}
-
-/** 启动时注册 Claude 会话涉及的工作区（幂等），让侧边栏出现对应分组。 */
-function registerClaudeWorkspaces(workspaceSvc) {
-  const cwds = new Set()
-  for (const f of claudeSessionFiles()) {
-    try {
-      const m = claudeParse(f, false)
-      if (m && m.cwd) cwds.add(m.cwd)
-    } catch { /* 单个文件损坏跳过 */ }
-  }
-  for (const cwd of cwds) {
-    workspaceSvc.create(cwd).catch(() => { /* 已存在或目录缺失均忽略 */ })
   }
 }
 
@@ -1861,6 +1853,24 @@ async function syncWorkspaces(workspaceSvc) {
   return { synced, failed }
 }
 
+/**
+ * 读取 POST 的 JSON 请求体。空体或非法 JSON 一律回 400（官方 /api 网关同款），
+ * 避免把畸形 body 当成空对象继续处理。
+ */
+async function readJsonBody(req, res) {
+  let raw = ''
+  for await (const chunk of req) raw += chunk
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object')
+    return parsed
+  } catch {
+    res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end('body is not JSON')
+    return null
+  }
+}
+
 /** 完整导入上限：支持超长会话无损导入。 */
 const MAX_IMPORT_MESSAGES = 2000
 /** 工具调用转换上限：支持完整工具执行轨迹导入。 */
@@ -2303,7 +2313,16 @@ async function attachImportedToWorkspace(workspaceSvc, session) {
     }
     cwd = canonPath(cwd)
     if (!cwd) return
-    const ws = workspaceSvc.list().find((w) => canonPath(w.path) === cwd)
+    let ws = workspaceSvc.list().find((w) => canonPath(w.path) === cwd)
+    // 启动不再批量登记外部工作区，这里按需补建：用户点了「接续」才把该会话
+    // 的目录登记为 DSH 工作区，随后挂接归组（写入只发生在显式操作时）。
+    if (!ws && typeof workspaceSvc.create === 'function') {
+      try {
+        ws = await workspaceSvc.create(cwd)
+      } catch {
+        ws = undefined
+      }
+    }
     if (ws && typeof ws.attachSession === 'function') {
       await ws.attachSession(session.id)
     } else {
@@ -2422,10 +2441,17 @@ function buildImportSeed(session, instruction) {
         }
         if (!content.length) continue
         step++
+        // DSH 0.2.2+ 的 seed 契约：assistant/message 前后各有一个 step 边界事件，
+        // 且 data.stream 必须是数组（宿主按它还原结算状态），缺一即拒绝导入。
+        seed.push({
+          type: 'step/start', seq: seq++, time: now,
+          data: { turn: currentTurn, step },
+        })
         seed.push({
           type: 'assistant/message', seq: seq++, time: now, surfaceOp: 'append',
           data: {
             turn: currentTurn, step,
+            stream: [],
             message: {
               id: randomUUID(), role: 'assistant', content,
               source: { kind: 'model', provider: prov.providerID ?? 'opencode', model: prov.modelID ?? 'unknown' },
@@ -2445,6 +2471,10 @@ function buildImportSeed(session, instruction) {
             },
           })
         }
+        seed.push({
+          type: 'step/end', seq: seq++, time: now,
+          data: { turn: currentTurn, step },
+        })
       } else {
         // 纯文本/思维链回复 step（最终回答）
         const content = []
@@ -2466,14 +2496,23 @@ function buildImportSeed(session, instruction) {
         if (!content.length) continue
         step++
         seed.push({
+          type: 'step/start', seq: seq++, time: now,
+          data: { turn: currentTurn, step },
+        })
+        seed.push({
           type: 'assistant/message', seq: seq++, time: now, surfaceOp: 'append',
           data: {
             turn: currentTurn, step,
+            stream: [],
             message: {
               id: randomUUID(), role: 'assistant', content,
               source: { kind: 'model', provider: prov.providerID ?? 'opencode', model: prov.modelID ?? 'unknown' },
             },
           },
+        })
+        seed.push({
+          type: 'step/end', seq: seq++, time: now,
+          data: { turn: currentTurn, step },
         })
       }
     }
@@ -2492,11 +2531,29 @@ export function apply(ctx, config = {}) {
   // 示例: config: { paths: { opencodeDb: '/data/opencode.db' } }
   if (config && typeof config.paths === 'object') Object.assign(PATHS, config.paths)
   if (config && Array.isArray(config.knownWebSessionIds)) KNOWN_WEB_SESSIONS = new Set(config.knownWebSessionIds)
-  ctx.inject(['webServer', 'workspaceRegistry', 'sessions'], (webCtx) => {
+  ctx.inject(['webServer', 'workspaceRegistry', 'sessions', 'connection'], (webCtx) => {
     const handler = async (req, res) => {
+      // 与官方 /api 网关同一套准入：先过 Connection 的 Host/Origin 围栏与
+      // 浏览器会话认证（未认证一律 401，越界 Host/Origin 一律 403）。
+      const rejection = webCtx.connection.requestRejection(req)
+      if (rejection !== undefined) {
+        res.writeHead(rejection, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(rejection === 401 ? 'unauthorized' : 'forbidden')
+        return
+      }
       const url = new URL(req.url ?? '/', 'http://localhost')
       const p = url.pathname
       const q = url.searchParams
+      // POST 必须是 application/json：与官方 /api 网关同款，避免跨源表单提交
+      // （text/plain 等简单内容类型）被浏览器当成可读的跨站请求。
+      if (req.method === 'POST') {
+        const ct = String(req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase()
+        if (ct !== 'application/json') {
+          res.writeHead(415, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('content type must be application/json')
+          return
+        }
+      }
       try {
         if (p === '/session-hub/api/overview' && req.method === 'GET') {
           return sendJson(res, 200, { ok: true, sources: overview() })
@@ -2556,10 +2613,8 @@ export function apply(ctx, config = {}) {
           return sendJson(res, s ? 200 : 404, s ? { ok: true, session: s } : { ok: false, error: 'session not found' })
         }
         if (p === '/session-hub/api/continue' && req.method === 'POST') {
-          let body = ''
-          for await (const chunk of req) body += chunk
-          let input = {}
-          try { input = JSON.parse(body || '{}') } catch { /* 非法 body 按空处理 */ }
+          const input = await readJsonBody(req, res)
+          if (input === null) return
           if (input.source === 'dsh') {
             return sendJson(res, 200, { ok: true, sessionId: input.id, reused: true })
           }
@@ -2629,10 +2684,8 @@ export function apply(ctx, config = {}) {
           return sendJson(res, 200, { ok: true, sessionId: sid, reused: false, title: sess.title, importedMessages: sess.messages?.length ?? 0 })
         }
         if (p === '/session-hub/api/export' && req.method === 'POST') {
-          let body = ''
-          for await (const chunk of req) body += chunk
-          let input = {}
-          try { input = JSON.parse(body || '{}') } catch { /* 非法 body 按空处理 */ }
+          const input = await readJsonBody(req, res)
+          if (input === null) return
           if (!input.sessionId) {
             return sendJson(res, 400, { ok: false, error: '缺少 sessionId 参数' })
           }
@@ -2652,11 +2705,11 @@ export function apply(ctx, config = {}) {
       }
     }
     const off = webCtx.webServer.register({ kind: 'prefix', path: '/session-hub', handler })
-    // 延迟到服务就绪后：注册全部外部历史工作区（侧边栏分组入口，幂等）+ 迁移归组
+    // 启动只做归组补挂接：把历史导入会话挂回已有 DSH 工作区。
+    // 不再在启动时把其他助手历史里的工作区批量登记进 DSH——那会改动 DSH 的
+    // 工作区列表；现在只在用户显式点「⇄ 同步工作区到 DSH 侧边栏」
+    // （POST /session-hub/api/workspaces/sync）时才登记。
     setTimeout(() => {
-      webCtx.workspaceRegistry.create(PATHS.antigravityVirtualCwd).catch(() => { /* 已存在或目录缺失均忽略 */ })
-      registerClaudeWorkspaces(webCtx.workspaceRegistry)
-      syncWorkspaces(webCtx.workspaceRegistry).catch(() => { /* 忽略个别非法目录 */ })
       migrateImportedGrouping(webCtx.workspaceRegistry, webCtx.sessions)
     }, 2000).unref?.()
     return off
