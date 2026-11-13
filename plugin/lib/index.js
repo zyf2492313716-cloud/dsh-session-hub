@@ -2925,4 +2925,4 @@ function apply(ctx, config = {}) {
 	});
 }
 //#endregion
-export { apply, invalidateSourceCache, listBySource, listWorkspaces, overview, readSession, searchSessions };
+export { apply, buildImportSeed, invalidateSourceCache, listBySource, listWorkspaces, overview, readSession, searchSessions };

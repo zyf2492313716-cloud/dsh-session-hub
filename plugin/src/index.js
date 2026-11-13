@@ -2353,7 +2353,7 @@ function migrateImportedGrouping(workspaceSvc, sessionsSvc) {
  * 事件（原生渲染/继续对话均可用），推理载荷跳过。工具入参/输出截断控制上下文；
  * 超过上限时保留最近的 MAX_IMPORT_MESSAGES 条、最多 MAX_IMPORT_TOOL_CALLS 个调用。
  */
-function buildImportSeed(session, instruction) {
+export function buildImportSeed(session, instruction) {
   const now = Date.now()
   const seed = []
   let seq = 0

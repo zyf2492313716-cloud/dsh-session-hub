@@ -208,6 +208,17 @@ A: 删除插件目录 `state.json` 中对应条目 + `$DSH_HOME/sessions/` 下�
 - **已验证**：manifest/Bundle Patch 解析、DSH Store 固定源码预检（`status: passed`，run 41980040464 @ `1469f20`）、DSH `0.2.1-rc.5` 一次性 Profile 安装、`/session-hub/api/overview` 与 workspaces/search API 可读。
 - **未验证**：真实 Desktop UI 侧边栏混排、卸载/回滚。
 
+### 导入 seed 的宿主契约守卫
+
+宿主对导入用的 seed 有硬校验，不合契约整份 seed 被拒（`seed ... has invalid settlement fields`、`message must have role "tool"`）。这些规则只存在于宿主包内，插件侧看不到，于是「宿主升级 → 导入静默失败」要等用户碰到才发现。
+
+仓库里因此放了两层守卫：
+
+- `test/host-seed-contract.mjs` —— 照抄 `@deepseek-ai/dsh-session` 的校验逻辑（`assertSessionEventEnvelope` / `assertCurrentLlmShape` / `assertAssistantSettlementShape` / `assertMessageEventShape` / `validateSessionEventData`）。这三个函数在本插件声明的四个宿主版本里逐字节相同（按函数体哈希核对过），所以这份校验器对整个兼容窗口成立。
+- `test/seed-contract.test.mjs` —— **调用插件真实的 `buildImportSeed` 生成 seed，再喂给上面那份宿主校验器**；src 与 lib 各跑一遍，另逐事件类型断言字段挂在正确的事件上。
+
+另有 `test/src-lib-parity.test.mjs`：本插件的 `lib/` 是提交进仓库的构建产物，但 tsdown 不是本包依赖，历史上一直手工同步 src 与 lib——2026-11 出过一次分叉（src 里补的 seed 适配没同步进 lib，发布出去直接导入失败）。这条守卫比对两边的公共 API 与实际行为，任何一边改了另一边没跟上就会红。
+
 ### `dsh.compatibility.dshReleases` 各行的证据
 
 | 版本 | 证据级别 | 依据 |
